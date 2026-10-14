@@ -1,0 +1,10 @@
+.DS_Store
+/build/
+/MAINTENANCE.local.md
+/使用说明.md
+/Integrations/Clawd/
+/Integrations/Hermes/chaoxi-capture/SKILL.md
+/Tests/HermesRoutingTests.py
+.env*
+*.pem
+*.key
