@@ -112,12 +112,13 @@ private struct EditorSession: Identifiable {
     var item: AgendaItem?
     var source: String?
     var schedulingChecklist = false
+    var occurrence: Occurrence? = nil
     var restoreCompactOnDismiss = false
 }
 private enum AgendaSection: Hashable { case agenda, checklist }
 private enum AgendaModal: Identifiable {
-    case editor(EditorSession), checklistEditor(EditorSession), postpone(Occurrence), settings, planner
-    var id: String { switch self { case .editor(let s), .checklistEditor(let s): return s.id.uuidString; case .postpone(let o): return "postpone:" + o.id; case .settings: return "settings"; case .planner: return "planner" } }
+    case editor(EditorSession), checklistEditor(EditorSession), settings, planner
+    var id: String { switch self { case .editor(let s), .checklistEditor(let s): return s.id.uuidString; case .settings: return "settings"; case .planner: return "planner" } }
 }
 
 struct AgendaView: View {
@@ -132,6 +133,7 @@ struct AgendaView: View {
     @State private var panelHeight: CGFloat = 850
     @State private var showingDateControls = false
     @State private var showingHighlightedChoices = false
+    @State private var showingCompactChoices = false
     @State private var scrollToNowToken = 0
     @State private var section = AgendaSection.agenda
     @State private var quickChecklistTitle = ""
@@ -153,7 +155,7 @@ struct AgendaView: View {
                         .font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.orange)
                         .frame(maxWidth: .infinity).padding(.vertical, 5).background(Color.orange.opacity(0.15))
                 }
-                if store.settings.compact { compact(now: now, alert: dueAlert) }
+                if store.settings.compact { compact(now: now) }
                 else {
                     header(now: now)
                     Picker("内容", selection: $section) {
@@ -226,9 +228,8 @@ struct AgendaView: View {
                         .padding(8).frame(maxWidth: .infinity).background(Color.orange.opacity(0.1))
                 }
                 switch content {
-            case .editor(let session): ItemEditor(store: store, item: session.item, source: session.source, schedulingChecklist: session.schedulingChecklist, onScheduled: { section = .agenda }) { modal = nil }.id(session.id)
+            case .editor(let session): ItemEditor(store: store, item: session.item, source: session.source, schedulingChecklist: session.schedulingChecklist, occurrence: session.occurrence, onScheduled: { section = .agenda }) { modal = nil }.id(session.id)
             case .checklistEditor(let session): ChecklistEditor(store: store, item: session.item, source: session.source) { modal = nil }.id(session.id)
-            case .postpone(let occurrence): PostponeEditor(store: store, occurrence: occurrence) { modal = nil }
             case .settings: SettingsView(store: store, controller: controller) { modal = nil }
             case .planner: DayPlanner(store: store) { modal = nil }
                 }
@@ -356,39 +357,60 @@ struct AgendaView: View {
             .popover(isPresented: $showingHighlightedChoices, arrowEdge: .bottom) { highlightedChoices() }
     }
 
-    private func highlightedChoices() -> some View {
-        let scheduled = store.occurrences(on: store.selectedDay).filter { !$0.isCompleted }
+    private func highlightedChoices(forCompact: Bool = false) -> some View {
+        let choiceDay = forCompact ? AgendaClock.startOfDay(Date()) : store.selectedDay
+        let scheduled = store.occurrences(on: choiceDay).filter { !$0.isCompleted }
         let checklist = store.checklistItems()
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("顶部事项").font(.system(size: 13, weight: .semibold))
+                Text(forCompact ? "小窗固定事项" : "顶部事项").font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Button("完成") { showingHighlightedChoices = false }.font(.system(size: 12))
+                Button("完成") { if forCompact { showingCompactChoices = false } else { showingHighlightedChoices = false } }.font(.system(size: 12))
             }
-            Button("自动选择下一件") { store.clearPinnedOccurrence(); showingHighlightedChoices = false }.font(.system(size: 13)).foregroundStyle(palette.accent)
+            Button(forCompact ? "最近安排" : "自动选择下一件") {
+                if forCompact {
+                    if store.setCompactFollowsPinned(false) { showingCompactChoices = false }
+                } else if store.clearPinnedOccurrence() { showingHighlightedChoices = false }
+            }.font(.system(size: 13)).foregroundStyle(palette.accent)
+            if forCompact {
+                if let fixed = store.highlightedFocus(now: Date()), store.isPinned(fixed) {
+                    Button {
+                        if store.setCompactFollowsPinned(true) { showingCompactChoices = false }
+                    } label: {
+                        Label("固定事项 · " + fixed.title, systemImage: store.compactUsesPinnedFocus ? "checkmark" : "pin")
+                            .font(.system(size: 13)).lineLimit(2)
+                    }.buttonStyle(.plain).foregroundStyle(palette.accent)
+                }
+                Button("添加待办…") { showingCompactChoices = false; controller.beginChecklistCapture() }
+                    .font(.system(size: 12)).buttonStyle(.plain)
+            }
             Rectangle().fill(palette.divider).frame(height: 0.5)
             ScrollView {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("独立清单").font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.secondary).padding(.top, 3)
                     if checklist.isEmpty { Text("没有未完成事项").font(.system(size: 12)).foregroundStyle(palette.secondary).padding(.vertical, 6) }
-                    ForEach(checklist) { item in focusChoice(.checklist(item), label: item.title) }
+                    ForEach(checklist) { item in focusChoice(.checklist(item), label: item.title, forCompact: forCompact) }
                     Rectangle().fill(palette.divider).frame(height: 0.5).padding(.vertical, 5)
-                    Text("\(Self.shortDayFormatter.string(from: store.selectedDay)) 的日程").font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.secondary)
+                    Text("\(Self.shortDayFormatter.string(from: choiceDay)) 的日程").font(.system(size: 11, weight: .semibold)).foregroundStyle(palette.secondary)
                     if scheduled.isEmpty { Text("这一天没有未完成安排").font(.system(size: 12)).foregroundStyle(palette.secondary).padding(.vertical, 6) }
-                    ForEach(scheduled) { o in focusChoice(.scheduled(o), label: (o.due.map { AgendaClock.timeText($0) } ?? "未定时") + " · " + o.title) }
+                    ForEach(scheduled) { o in focusChoice(.scheduled(o), label: (o.due.map { AgendaClock.timeText($0) } ?? "未定时") + " · " + o.title, forCompact: forCompact) }
                 }
             }.frame(maxHeight: 280)
         }.font(.system(size: 14)).padding(16).frame(width: 264).foregroundStyle(palette.ink).background(palette.background).environment(\.agendaPalette, palette).tint(palette.accent)
     }
 
-    private func focusChoice(_ focus: AgendaFocus, label: String) -> some View {
+    private func focusChoice(_ focus: AgendaFocus, label: String, forCompact: Bool = false) -> some View {
         Button {
-            if focus.isChecklist { _ = store.pinChecklistItem(focus.item.id) }
-            else if let o = focus.occurrence { _ = store.pinOccurrence(o) }
-            showingHighlightedChoices = false
+            let saved: Bool
+            if focus.isChecklist { saved = store.pinChecklistItem(focus.item.id, inCompact: forCompact) }
+            else if let o = focus.occurrence { saved = store.pinOccurrence(o, inCompact: forCompact) }
+            else { saved = false }
+            if saved {
+                if forCompact { showingCompactChoices = false } else { showingHighlightedChoices = false }
+            }
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 7) {
-                Image(systemName: store.isPinned(focus) ? "checkmark.circle.fill" : "circle").foregroundStyle(palette.accent)
+                Image(systemName: store.isPinned(focus) && (!forCompact || store.compactUsesPinnedFocus) ? "checkmark.circle.fill" : "circle").foregroundStyle(palette.accent)
                 Text(label).lineLimit(2).multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
             }.font(.system(size: 13)).padding(.vertical, 6).contentShape(Rectangle())
         }.buttonStyle(.plain).help(focus.title)
@@ -397,7 +419,7 @@ struct AgendaView: View {
     private func highlightedSchedule(_ focus: AgendaFocus, now: Date, includeTentative: Bool = true) -> String {
         if focus.isChecklist { return "清单事项" }
         let day = (focus.occurrence?.displayDay).map { AgendaClock.dayKey($0) == AgendaClock.dayKey(now) ? "" : Self.shortDayFormatter.string(from: $0) + " " } ?? ""
-        return day + (focus.occurrence?.postponedUntil != nil ? "已推迟 " : "") + (includeTentative && focus.item.isTentative ? "待确认·不提醒 · " : "") + (focus.due.map { AgendaClock.timeText($0) } ?? "未定时")
+        return day + (focus.occurrence?.postponedUntil != nil ? "本次已调整 " : "") + (includeTentative && focus.item.isTentative ? "待确认·不提醒 · " : "") + (focus.due.map { AgendaClock.timeText($0) } ?? "未定时")
     }
 
     private func highlightedStatus(_ focus: AgendaFocus, now: Date) -> String {
@@ -411,7 +433,7 @@ struct AgendaView: View {
             return "已到时间 · " + AgendaClock.countdown(to: due, now: now)
         }
         if due.timeIntervalSince(now) <= 1 { return "即将开始" }
-        return (focus.occurrence?.postponedUntil != nil ? "已推迟 · 还有 " : "还有 ") + AgendaClock.countdown(to: due, now: now)
+        return (focus.occurrence?.postponedUntil != nil ? "本次已调整 · 还有 " : "还有 ") + AgendaClock.countdown(to: due, now: now)
     }
 
     private func reminderTime(_ date: Date, now: Date) -> String {
@@ -425,23 +447,20 @@ struct AgendaView: View {
                 Button("30 分钟后提醒") { store.snooze(o, minutes: 30) }
             }.disabled(o.item.isTentative || !o.item.reminderEnabled || o.remindAt == nil)
             if o.item.feishu == nil {
-                Menu("推迟这次安排（改变执行时间）") {
-                    Button("推迟 10 分钟") { _ = store.postpone(o, minutes: 10) }
-                    Button("推迟 30 分钟") { _ = store.postpone(o, minutes: 30) }
-                    Button("选择新的时间…") { modal = .postpone(o) }
-                }
+                Button("推迟这次 10 分钟") { _ = store.postpone(o, minutes: 10) }
+                Button("推迟这次 30 分钟") { _ = store.postpone(o, minutes: 30) }
             }
         }
     }
 
     private func editFocus(_ focus: AgendaFocus) {
-        if focus.item.feishu != nil { openScheduledItem(focus.item); return }
-        let session = EditorSession(item: focus.item, source: nil)
+        if focus.item.feishu != nil { openScheduledItem(focus.item, occurrence: focus.occurrence); return }
+        let session = EditorSession(item: focus.item, source: nil, occurrence: focus.occurrence)
         modal = focus.isChecklist ? .checklistEditor(session) : .editor(session)
     }
 
-    private func openScheduledItem(_ item: AgendaItem) {
-        guard let source = item.feishu else { modal = .editor(EditorSession(item: item, source: nil)); return }
+    private func openScheduledItem(_ item: AgendaItem, occurrence: Occurrence? = nil) {
+        guard let source = item.feishu else { modal = .editor(EditorSession(item: item, source: nil, occurrence: occurrence)); return }
         guard let raw = source.appLink, let url = URL(string: raw), url.scheme == "https",
               ["applink.feishu.cn", "applink.larkoffice.com"].contains(url.host ?? ""), url.path == "/client/calendar/event/detail", url.user == nil, url.password == nil else {
             store.error = "该日程来自飞书，请在飞书日历中查看或修改。"
@@ -521,13 +540,13 @@ struct AgendaView: View {
                 if o.item.durationMinutes > 0 { Text((AgendaClock.dayKey(o.end!) != AgendaClock.dayKey(o.day) ? Self.shortDayFormatter.string(from: o.end!) + " " : "") + AgendaClock.timeText(o.end!)).font(.system(size: 11, design: .rounded)).monospacedDigit().foregroundStyle(palette.secondary).lineLimit(1).minimumScaleFactor(0.7) }
             }.frame(width: 44, alignment: .trailing).padding(.top, 3)
             Button { store.toggle(o) } label: { Image(systemName: o.isCompleted ? "checkmark.circle.fill" : "circle").font(.system(size: 18, weight: .light)).foregroundStyle(color).frame(width: 22, height: 26).background(Circle().fill(palette.background).frame(width: 17, height: 17)) }.buttonStyle(.plain).accessibilityLabel(o.isCompleted ? "恢复 \(o.title)" : "完成 \(o.title)")
-            Button { openScheduledItem(o.item) } label: {
+            Button { openScheduledItem(o.item, occurrence: o) } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(o.title).font(.system(size: 15, weight: .medium)).strikethrough(o.isCompleted).lineLimit(2).multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
                     HStack(spacing: 4) {
                         if o.item.feishu != nil { Text("飞书").foregroundStyle(palette.accent) }
                         if o.item.isTentative { Text("待确认·不提醒").foregroundStyle(palette.warning).fixedSize() }
-                        if o.postponedUntil != nil { Text("已推迟").foregroundStyle(palette.accent) }
+                        if o.postponedUntil != nil { Text("本次已调整").foregroundStyle(palette.accent) }
                         Text(status).foregroundStyle(o.isCompleted ? palette.secondary : color).lineLimit(1).help(status)
                         if o.item.repeatRule != .none { Image(systemName: "repeat").font(.system(size: 10)).help(o.item.repeatRule.label + "重复").accessibilityLabel(o.item.repeatRule.label + "重复") }
                         if o.item.reminderEnabled && !o.item.isTentative { Image(systemName: "bell").font(.system(size: 10)).help("到点提醒已开启").accessibilityLabel("到点提醒已开启") }
@@ -535,7 +554,7 @@ struct AgendaView: View {
                 }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(.plain).help(o.title).accessibilityLabel(scheduledItemAccessibilityLabel(o))
             Menu {
-                Button(o.item.feishu == nil ? "修改安排" : "在飞书中查看") { openScheduledItem(o.item) }
+                Button(o.item.feishu == nil ? "修改安排" : "在飞书中查看") { openScheduledItem(o.item, occurrence: o) }
                 Button(o.isCompleted ? "恢复待办" : "标记完成") { store.toggle(o) }
                 if !o.isCompleted { Button(store.isPinned(o) ? "取消顶部固定" : "固定到顶部") { if store.isPinned(o) { store.clearPinnedOccurrence() } else { _ = store.pinOccurrence(o) } } }
                 delayActions(o)
@@ -553,7 +572,7 @@ struct AgendaView: View {
                 Image(systemName: o.isCompleted ? "checkmark.circle.fill" : "circle").font(.system(size: 19, weight: .light)).foregroundStyle(o.isCompleted ? palette.accent.opacity(0.55) : overdue ? palette.warning : palette.accent.opacity(0.45)).frame(width: 24, height: 29)
             }.buttonStyle(.plain).help(o.isCompleted ? "恢复 \(o.item.title)" : "完成 \(o.item.title)").accessibilityLabel(o.isCompleted ? "恢复 \(o.item.title)" : "完成 \(o.item.title)")
             Button {
-                openScheduledItem(o.item)
+                openScheduledItem(o.item, occurrence: o)
             } label: {
                 HStack(alignment: .top, spacing: 10) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -563,7 +582,7 @@ struct AgendaView: View {
                     VStack(alignment: .leading, spacing: 5) {
                         HStack(alignment: .firstTextBaseline, spacing: 5) {
                             Text(o.item.title).font(.system(size: 15, weight: .medium)).strikethrough(o.isCompleted).lineLimit(3).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
-                            if o.postponedUntil != nil { badge("已推迟", color: palette.accent) }
+                            if o.postponedUntil != nil { badge("本次已调整", color: palette.accent) }
                         }
                         if o.item.isTentative { Text("待确认·不提醒").font(.system(size: 11)).foregroundStyle(palette.warning) }
                         HStack(spacing: 5) {
@@ -581,7 +600,7 @@ struct AgendaView: View {
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityLabel(scheduledItemAccessibilityLabel(o))
             Menu {
-                Button(o.item.feishu == nil ? "修改安排" : "在飞书中查看") { openScheduledItem(o.item) }
+                Button(o.item.feishu == nil ? "修改安排" : "在飞书中查看") { openScheduledItem(o.item, occurrence: o) }
                 delayActions(o)
                 Button(o.isCompleted ? "恢复待办" : "标记完成") { store.toggle(o) }
                 if !o.isCompleted { Button(store.isPinned(o) ? "取消顶部固定" : "固定到顶部") { if store.isPinned(o) { store.clearPinnedOccurrence() } else { _ = store.pinOccurrence(o) } } }
@@ -688,25 +707,37 @@ struct AgendaView: View {
         }
     }
 
-    private func compact(now: Date, alert: Occurrence?) -> some View {
-        let highlighted = store.highlightedFocus(now: now)
-        let pinned = highlighted.flatMap { store.isPinned($0) ? $0 : nil }
-        let displayed = pinned ?? alert.map { AgendaFocus.scheduled($0) } ?? highlighted
-        let displaysAlert = alert != nil && displayed?.occurrence?.id == alert?.id
-        let otherAlert = alert.flatMap { $0.id != displayed?.occurrence?.id ? $0 : nil }
-        let overdue = AgendaClock.overdue(items: store.items, now: now).count + AgendaClock.earlierUnscheduled(items: store.items, now: now).count
+    private func compact(now: Date) -> some View {
+        let displayed = store.compactFocus(now: now)
+        let followsPinned = store.compactUsesPinnedFocus
+        let overdue = AgendaClock.overdue(items: store.items, now: now).filter { ($0.end ?? .distantPast) <= now }.count + AgendaClock.earlierUnscheduled(items: store.items, now: now).count
+        let detail = displayed.map { focus -> String in
+            if focus.isChecklist { return "固定的清单事项" }
+            let status: String
+            if let due = focus.due, due <= now, let end = focus.occurrence?.end, end > now {
+                status = "还剩 " + AgendaClock.countdown(to: end, now: now)
+            } else { status = highlightedStatus(focus, now: now) }
+            return highlightedSchedule(focus, now: now) + " · " + status
+        } ?? "点展开查看日程"
         return HStack(spacing: 10) {
-            Image(systemName: displaysAlert ? "bell.badge.fill" : pinned != nil ? "pin.fill" : "sun.horizon.fill").font(.system(size: 20)).foregroundStyle(displaysAlert ? palette.warning : palette.accent)
+            Button { showingCompactChoices = true } label: {
+                HStack(spacing: 2) {
+                    Image(systemName: followsPinned ? "pin.fill" : "calendar").font(.system(size: 18))
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                }.frame(width: 32, height: 32).contentShape(Rectangle()).foregroundStyle(palette.accent)
+            }.buttonStyle(.plain).fixedSize()
+                .help("小窗显示：\(followsPinned ? "固定事项" : "最近安排")，点击切换")
+                .accessibilityLabel("切换小窗显示：\(followsPinned ? "固定事项" : "最近安排")")
+                .popover(isPresented: $showingCompactChoices, arrowEdge: .bottom) { highlightedChoices(forCompact: true) }
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    Text((controller.isQA ? "[测试] " : "") + (displayed.map { (displaysAlert ? "已到时间 · " : "") + $0.title } ?? "朝夕 · 此刻从容")).font(.system(size: 15, weight: .semibold)).foregroundStyle(displaysAlert ? palette.warning : palette.ink).lineLimit(1).help(displayed?.title ?? "")
-                }
-                Text(displayed.map { $0.isChecklist ? "清单事项" : highlightedSchedule($0, now: now) + " · " + (displaysAlert ? "等你处理" : highlightedStatus($0, now: now)) } ?? "点此展开日程").font(.system(size: 11)).foregroundStyle(displaysAlert ? palette.warning : palette.secondary).monospacedDigit().lineLimit(1)
-                if let otherAlert {
-                    Label("到点 · " + otherAlert.title + " · 等你处理", systemImage: "bell.badge.fill").font(.system(size: 11)).foregroundStyle(palette.warning).lineLimit(1).help("已到时间 · " + otherAlert.title + " · 等你处理")
-                } else if overdue > 0 { Text("\(overdue) 件待处理").font(.system(size: 11)).foregroundStyle(palette.warning) }
+                Text((controller.isQA ? "[测试] " : "") + (displayed?.title ?? "暂无接下来的安排")).font(.system(size: 15, weight: .semibold)).foregroundStyle(palette.ink).lineLimit(1).help(displayed?.title ?? "")
+                Text(detail).font(.system(size: 11)).foregroundStyle(palette.secondary).monospacedDigit().lineLimit(1).minimumScaleFactor(0.85).help(detail)
             }.frame(maxWidth: .infinity, alignment: .leading)
-            IconButton(symbol: "plus", label: "添加待办") { controller.beginChecklistCapture() }
+            if overdue > 0 {
+                Button { store.settings.compact = false; _ = store.save() } label: {
+                    Label("\(overdue)", systemImage: "bell.badge.fill").font(.system(size: 11)).foregroundStyle(palette.warning).padding(.vertical, 6)
+                }.buttonStyle(.plain).help("\(overdue) 件安排待处理，展开查看").accessibilityLabel("\(overdue) 件安排待处理，展开查看")
+            }
             HStack(spacing: 3) {
                 IconButton(symbol: "minus", label: "隐藏日程") { controller.minimizeToMenu() }
                 Button { store.settings.compact = false; _ = store.save() } label: { Text("展开").font(.system(size: 11, weight: .medium)).frame(width: 44, height: 30).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 9)) }.buttonStyle(.plain).help("展开日程")
@@ -757,35 +788,6 @@ struct AgendaView: View {
     static let fullDayFormatter: DateFormatter = { let f = DateFormatter(); f.locale = Locale(identifier: "zh_CN"); f.timeZone = AgendaClock.calendar.timeZone; f.dateFormat = "M 月 d 日 EEEE"; return f }()
 }
 
-private struct PostponeEditor: View {
-    @Environment(\.agendaPalette) private var palette
-    @ObservedObject var store: AgendaStore
-    let occurrence: Occurrence
-    let close: () -> Void
-    @State private var target = Date()
-    @State private var validation: String?
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("推迟这次安排").font(.system(size: 22, weight: .semibold))
-            Text(occurrence.title).font(.system(size: 15, weight: .medium))
-            Text("顶部、时间轴和提醒将一起改到新时间。重复安排只改这一次；暂定安排仍不提醒。").font(.system(size: 13)).foregroundStyle(palette.secondary).fixedSize(horizontal: false, vertical: true)
-            DatePicker("新时间", selection: $target, displayedComponents: [.date, .hourAndMinute])
-                .environment(\.timeZone, AgendaClock.calendar.timeZone)
-            if let validation { Text(validation).font(.system(size: 13)).foregroundStyle(palette.warning) }
-            HStack {
-                Button("取消") { close() }.keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("确认推迟") {
-                    if store.postpone(occurrence, until: target) {
-                        close()
-                    } else { validation = store.error }
-                }.keyboardShortcut(.defaultAction)
-            }
-        }.font(.system(size: 14)).padding(24).frame(width: 370).foregroundStyle(palette.ink).background(palette.background).tint(palette.accent)
-            .onAppear { target = max(occurrence.due ?? Date(), Date()).addingTimeInterval(1800) }
-    }
-}
-
 struct ItemEditor: View {
     @Environment(\.colorScheme) private var colorScheme
     private var palette: AgendaPalette { AgendaPalette(mode: store.settings.appearanceMode, accent: store.settings.accentColor, systemScheme: agendaSystemColorScheme(fallback: colorScheme)) }
@@ -793,6 +795,7 @@ struct ItemEditor: View {
     let item: AgendaItem?
     let source: String?
     var schedulingChecklist = false
+    var occurrence: Occurrence? = nil
     var onScheduled: () -> Void = {}
     let close: () -> Void
     @State private var title = ""
@@ -807,22 +810,65 @@ struct ItemEditor: View {
     @State private var note = ""
     @State private var validation: String?
     @State private var originalItem: AgendaItem?
+    @State private var onlyThisTime = true
+    @State private var showingDetails = false
     @FocusState private var titleFocused: Bool
+    private var canChooseScope: Bool { occurrence?.due != nil && item != nil && item?.repeatRule != RepeatRule.none }
+    private var editingSingleTime: Bool { canChooseScope && onlyThisTime }
+    private var saveLabel: String { canChooseScope ? (onlyThisTime ? "保存这一次" : "保存每次修改") : "保存安排" }
     var body: some View {
-        VStack(alignment: .leading, spacing: 19) {
-            HStack { VStack(alignment: .leading, spacing: 4) { Text(schedulingChecklist ? "安排日期与时间" : item.map { original in store.items.contains(where: { $0.id == original.id }) } == true ? "调整这件事" : "安排一件事").font(.system(size: 24, weight: .semibold)); Text(source == "clawd" ? "从 Clawd 捕获，保存后进入你的日程。" : "给时间留个位置，剩下的交给朝夕。" ).font(.system(size: 13)).foregroundStyle(palette.secondary) }; Spacer(); Button { close() } label: { Image(systemName: "xmark").frame(width: 24, height: 24) }.buttonStyle(.plain).accessibilityLabel("取消编辑") }
-            TextField("要做什么？", text: $title).font(.system(size: 18)).textFieldStyle(.plain).padding(13).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 12)).focused($titleFocused)
-            HStack { DatePicker("日期", selection: $day, displayedComponents: .date); Spacer(); Toggle("定时", isOn: $hasTime).toggleStyle(.switch) }
-            if hasTime { HStack { Text("开始"); TimeInput(text: $timeInput, label: "开始时间"); Spacer(); Stepper(value: $duration, in: 0...720, step: 5) { Text(duration == 0 ? "不设时长" : "\(duration) 分钟").font(.system(size: 13)) }.frame(width: 160) } }
-            HStack { Picker("分类", selection: $category) { ForEach(["生活", "工作", "学习", "健康"], id: \.self) { Text($0).tag($0) } }; Picker("重复", selection: $repeatRule) { ForEach(RepeatRule.allCases, id: \.self) { Text($0.label).tag($0) } } }
-            if repeatRule != .none { Text("重复安排从所选日期开始。修改内容会应用到整个重复安排；每天的完成状态独立保存。").font(.system(size: 12)).foregroundStyle(palette.secondary) }
-            TextField("备注（可选）", text: $note, axis: .vertical).lineLimit(2...3).textFieldStyle(.roundedBorder)
-            Toggle("时间尚未确认，暂不提醒", isOn: $tentative)
-            if !tentative && hasTime { Toggle("提前和到点提醒", isOn: $reminder) }
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text(schedulingChecklist ? "安排日期与时间" : item == nil ? "安排一件事" : "修改安排").font(.system(size: 24, weight: .semibold))
+                Spacer()
+                Button { close() } label: { Image(systemName: "xmark").frame(width: 24, height: 24) }.buttonStyle(.plain).accessibilityLabel("取消编辑")
+            }
+            if editingSingleTime {
+                Text(item?.title ?? title).font(.system(size: 18, weight: .medium)).fixedSize(horizontal: false, vertical: true)
+            } else {
+                TextField("要做什么？", text: $title).font(.system(size: 18)).textFieldStyle(.plain).padding(12).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 10)).focused($titleFocused)
+            }
+            if canChooseScope {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("修改范围", selection: $onlyThisTime) {
+                        Text("仅这一次").tag(true)
+                        Text("每次都修改").tag(false)
+                    }.pickerStyle(.segmented)
+                    Text(onlyThisTime ? "仅调整 \(AgendaClock.dayKey(occurrence!.day)) 这一次的日期和时间，其他日期不变。" : "应用到整个重复安排，包含历史日期。改变日期、时间或重复方式会重置单次时间调整；完成记录保留。")
+                        .font(.system(size: 12)).foregroundStyle(palette.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            HStack {
+                DatePicker(canChooseScope && !onlyThisTime ? "重复起始日" : "日期", selection: $day, displayedComponents: .date)
+                    .environment(\.timeZone, AgendaClock.calendar.timeZone)
+                Spacer()
+                if !editingSingleTime { Toggle("定时", isOn: $hasTime).toggleStyle(.switch) }
+            }
+            if hasTime { HStack { Text("时间"); Spacer(); TimeInput(text: $timeInput, label: "开始时间") } }
+            if !editingSingleTime {
+                Picker("重复", selection: $repeatRule) { ForEach(RepeatRule.allCases, id: \.self) { Text($0.label).tag($0) } }
+                if !tentative && hasTime { Toggle("提前和到点提醒", isOn: $reminder) }
+                DisclosureGroup("更多选项", isExpanded: $showingDetails) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Picker("分类", selection: $category) { ForEach(Array(Set(["生活", "工作", "学习", "健康", category])).sorted(), id: \.self) { Text($0).tag($0) } }
+                        if hasTime { Stepper(value: $duration, in: 0...1440, step: 5) { Text(duration == 0 ? "不设时长" : "时长 \(duration) 分钟") } }
+                        TextField("备注（可选）", text: $note, axis: .vertical).lineLimit(2...3).textFieldStyle(.roundedBorder)
+                        Toggle("时间尚未确认，暂不提醒", isOn: $tentative)
+                    }.padding(.top, 10)
+                }
+            } else {
+                Text("名称、重复方式和提醒设置可切换到“每次都修改”调整。")
+                    .font(.system(size: 12)).foregroundStyle(palette.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if let validation { Text(validation).foregroundStyle(palette.warning).font(.system(size: 13)) }
-            HStack { Button("取消") { close() }.keyboardShortcut(.cancelAction); Spacer(); Button { save() } label: { Text("保存安排").padding(.horizontal, 12).padding(.vertical, 6).background(palette.primaryFill, in: RoundedRectangle(cornerRadius: 7)).foregroundStyle(palette.primaryInk).contentShape(Rectangle()) }.buttonStyle(.plain).keyboardShortcut(.defaultAction).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+            HStack { Button("取消") { close() }.keyboardShortcut(.cancelAction); Spacer(); Button { save() } label: { Text(saveLabel).padding(.horizontal, 12).padding(.vertical, 6).background(palette.primaryFill, in: RoundedRectangle(cornerRadius: 7)).foregroundStyle(palette.primaryInk).contentShape(Rectangle()) }.buttonStyle(.plain).keyboardShortcut(.defaultAction).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
         }.font(.system(size: 14)).padding(27).frame(width: 420).foregroundStyle(palette.ink).background(palette.background).environment(\.agendaPalette, palette).tint(palette.accent)
-            .onAppear { load(); titleFocused = true }
+            .onAppear { load(); titleFocused = !editingSingleTime }
+            .onChange(of: onlyThisTime) {
+                validation = nil
+                day = onlyThisTime ? (occurrence?.displayDay ?? store.selectedDay) : (originalItem?.date ?? store.selectedDay)
+                titleFocused = false
+            }
             .onChange(of: tentative) { if !tentative { reminder = true } }
     }
     private func load() {
@@ -835,9 +881,19 @@ struct ItemEditor: View {
             let mins = item?.timeMinutes ?? ((AgendaClock.calendar.component(.hour, from: Date()) * 60 + AgendaClock.calendar.component(.minute, from: Date()) + 30) % 1440)
             timeInput = String(format: "%02d:%02d", mins / 60, mins % 60)
         }
+        if editingSingleTime, let due = occurrence?.due {
+            day = AgendaClock.startOfDay(due)
+            timeInput = AgendaClock.timeText(due)
+        }
     }
     private func save() {
         if hasTime && parseClockInput(timeInput) == nil { validation = "请输入有效的 24 小时时间，例如 09:30。"; return }
+        if editingSingleTime, let occurrence, let minutes = parseClockInput(timeInput),
+           let target = AgendaClock.calendar.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: day) {
+            if store.rescheduleOccurrence(occurrence, until: target) { close() }
+            else { validation = store.error ?? "保存失败，请重试。" }
+            return
+        }
         var edited = originalItem ?? AgendaItem(title: title, date: day)
         edited.title = title.trimmingCharacters(in: .whitespacesAndNewlines); edited.date = AgendaClock.startOfDay(day); edited.timeMinutes = hasTime ? parseClockInput(timeInput) : nil; edited.durationMinutes = duration; edited.category = category; edited.repeatRule = repeatRule; edited.isTentative = tentative; edited.reminderEnabled = reminder && !tentative && hasTime; edited.note = note
         let browsingDay = store.selectedDay

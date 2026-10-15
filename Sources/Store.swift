@@ -23,6 +23,7 @@ struct AgendaSettings: Codable, Equatable {
     var pinnedOccurrenceID: String? = nil
     var accentName: String? = nil
     var feishuSyncEnabled: Bool? = nil
+    var compactFollowsPinned: Bool? = nil
     var appearanceMode: AgendaAppearanceMode {
         get { AgendaAppearanceMode(rawValue: theme) ?? .light }
         set { theme = newValue.rawValue }
@@ -198,6 +199,26 @@ private struct AgendaDocument: Codable {
         return commit(candidate, settings: settings)
     }
     private func validPostponement(_ target: Date, after: Date) -> Bool { Self.validDate(target) && target > after }
+    // The persisted field also holds explicit single-occurrence time edits.
+    // Quick postponement keeps its stricter future-only guard above.
+    @discardableResult func rescheduleOccurrence(_ occurrence: Occurrence, until target: Date) -> Bool {
+        var candidate = savedItems
+        guard Self.validDate(target),
+              let current = AgendaClock.occurrence(items: candidate, id: occurrence.id),
+              current.due != nil, current.item.feishu == nil,
+              let index = candidate.firstIndex(where: { $0.id == current.item.id }) else {
+            error = "这次安排无法调整，请重新打开事项；飞书日程需在飞书中修改"; return false
+        }
+        var base = candidate[index]
+        base.postponedTimes = nil
+        guard let original = AgendaClock.occurrence(items: [base], id: current.id)?.due else { return false }
+        var times = candidate[index].postponedTimes ?? [:]
+        if target == original { times.removeValue(forKey: current.completionKey) }
+        else { times[current.completionKey] = target }
+        candidate[index].postponedTimes = times.isEmpty ? nil : times
+        candidate[index].snoozes.removeValue(forKey: current.completionKey)
+        return commit(candidate, settings: settings)
+    }
     func delete(_ id: UUID) {
         guard !savedItems.contains(where: { $0.id == id && $0.feishu != nil }) else { error = "飞书事件请在飞书中取消"; return }
         guard savedItems.contains(where: { $0.id == id }) else { return }
@@ -262,15 +283,41 @@ private struct AgendaDocument: Codable {
         if let next = AgendaClock.next(items: savedItems, now: now) { return .scheduled(next) }
         return savedItems.first(where: { $0.checklistState == .pending }).map(AgendaFocus.checklist)
     }
-    @discardableResult func pinChecklistItem(_ id: UUID) -> Bool {
+    var compactUsesPinnedFocus: Bool {
+        savedSettings.compactFollowsPinned == true && Self.pinnedFocus(items: savedItems, settings: savedSettings) != nil
+    }
+    func compactFocus(now: Date) -> AgendaFocus? {
+        if compactUsesPinnedFocus { return Self.pinnedFocus(items: savedItems, settings: savedSettings) }
+        let today = AgendaClock.startOfDay(now)
+        let yesterday = AgendaClock.calendar.date(byAdding: .day, value: -1, to: today)!
+        let ongoing = [yesterday, today].flatMap { AgendaClock.occurrences(items: savedItems, on: $0) }
+            .filter { !$0.isCompleted && ($0.due ?? .distantFuture) <= now && ($0.end ?? .distantPast) > now }
+            .sorted {
+                if $0.due != $1.due { return $0.due! > $1.due! }
+                return $0.id < $1.id
+            }.first
+        if let ongoing { return .scheduled(ongoing) }
+        return AgendaClock.next(items: savedItems, now: now).map(AgendaFocus.scheduled)
+    }
+    @discardableResult func setCompactFollowsPinned(_ pinned: Bool) -> Bool {
+        guard !pinned || Self.pinnedFocus(items: savedItems, settings: savedSettings) != nil else {
+            error = "请先选择要固定的事项"; return false
+        }
+        if savedSettings.compactFollowsPinned == pinned { return true }
+        var candidate = settings
+        candidate.compactFollowsPinned = pinned
+        return commit(savedItems, settings: candidate)
+    }
+    @discardableResult func pinChecklistItem(_ id: UUID, inCompact: Bool = false) -> Bool {
         guard let item = savedItems.first(where: { $0.id == id && $0.checklistState == .pending }) else {
             error = "只能固定仍在清单里的未完成事项"
             return false
         }
         let focusID = AgendaFocus.checklist(item).id
-        if savedSettings.pinnedOccurrenceID == focusID { return true }
+        if savedSettings.pinnedOccurrenceID == focusID && (!inCompact || compactUsesPinnedFocus) { return true }
         var candidateSettings = settings
         candidateSettings.pinnedOccurrenceID = focusID
+        if inCompact { candidateSettings.compactFollowsPinned = true }
         return commit(savedItems, settings: candidateSettings)
     }
     func isPinned(_ focus: AgendaFocus) -> Bool {
@@ -287,15 +334,16 @@ private struct AgendaDocument: Codable {
     func highlightedOccurrence(now: Date) -> Occurrence? {
         Self.pinnedOccurrence(items: savedItems, settings: savedSettings) ?? AgendaClock.next(items: savedItems, now: now)
     }
-    @discardableResult func pinOccurrence(_ occurrence: Occurrence) -> Bool {
+    @discardableResult func pinOccurrence(_ occurrence: Occurrence, inCompact: Bool = false) -> Bool {
         guard let current = AgendaClock.occurrence(items: savedItems, id: occurrence.id), !current.isCompleted else {
             error = "只能固定仍在清单里的未完成事项"
             return false
         }
         guard !locked else { return commit(savedItems, settings: savedSettings) }
-        if savedSettings.pinnedOccurrenceID == current.id { return true }
+        if savedSettings.pinnedOccurrenceID == current.id && (!inCompact || compactUsesPinnedFocus) { return true }
         var candidateSettings = settings
         candidateSettings.pinnedOccurrenceID = current.id
+        if inCompact { candidateSettings.compactFollowsPinned = true }
         return commit(savedItems, settings: candidateSettings)
     }
     @discardableResult func clearPinnedOccurrence() -> Bool {
@@ -363,6 +411,7 @@ private struct AgendaDocument: Codable {
             var candidateSettings = candidateSettings
             if Self.pinnedFocus(items: candidate, settings: candidateSettings) == nil {
                 candidateSettings.pinnedOccurrenceID = nil
+                if candidateSettings.compactFollowsPinned == true { candidateSettings.compactFollowsPinned = false }
             }
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -510,7 +559,7 @@ private struct AgendaDocument: Codable {
             for (key, target) in item.postponedTimes ?? [:] {
                 var original = item; original.postponedTimes = nil
                 guard validDate(target), let occurrence = AgendaClock.occurrence(items: [original], id: item.id.uuidString + ":" + key),
-                      let due = occurrence.due, target > due else { throw StoreError.invalid("推迟安排时刻无效") }
+                      occurrence.due != nil else { throw StoreError.invalid("单次安排时刻无效") }
             }
         }
     }

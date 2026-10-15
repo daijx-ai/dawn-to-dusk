@@ -382,7 +382,8 @@ import Darwin
         try expect(!store.postpone(o, until: now, now: now) && !store.postpone(o, until: Date(timeIntervalSince1970: .nan), now: now), "reject old and nonfinite target times")
         try expect((try Data(contentsOf: store.fileURL)) == rejectionBytes, "failed postponements preserve bytes")
         var invalid = original; invalid.id = UUID(); invalid.postponedTimes = ["2026-10-12": date(2026, 10, 12, 18)]
-        try expect(!store.upsert(invalid), "reject persisted postponement before original time")
+        try expect(store.upsert(invalid), "explicit single-occurrence edits may be earlier than the base time")
+        store.undo()
         invalid.postponedTimes = ["2026-10-11": date(2026, 10, 12, 21)]
         try expect(!store.upsert(invalid), "reject override without a valid original occurrence")
         let checklist = AgendaItem(title: "独立清单", date: date(), reminderEnabled: false, checklistState: .pending)

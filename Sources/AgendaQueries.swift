@@ -156,7 +156,7 @@ enum AgendaQueryReader {
                 var original = item
                 original.postponedTimes = nil
                 guard FeishuMetadata.validDate(target), let occurrence = AgendaClock.occurrence(items: [original], id: item.id.uuidString + ":" + key),
-                      let due = occurrence.due, target > due else { throw AgendaQueryError.invalidDocument }
+                      occurrence.due != nil else { throw AgendaQueryError.invalidDocument }
             }
         }
     }

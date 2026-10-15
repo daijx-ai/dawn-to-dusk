@@ -32,3 +32,9 @@ mkdir -p "$project_root/build/tests"
 
 /usr/bin/swiftc -parse-as-library "$project_root/Sources/Domain.swift" "$project_root/Sources/FeishuModels.swift" "$project_root/Sources/CaptureModels.swift" "$project_root/Sources/Store.swift" "$project_root/Tests/EditorNavigationTests.swift" -o "$project_root/build/tests/editor-navigation"
 "$project_root/build/tests/editor-navigation"
+
+/usr/bin/swiftc -parse-as-library "$project_root/Sources/Domain.swift" "$project_root/Sources/FeishuModels.swift" "$project_root/Sources/CaptureModels.swift" "$project_root/Sources/Store.swift" "$project_root/Sources/CaptureBridge.swift" "$project_root/Sources/AgendaQueries.swift" "$project_root/Sources/Notifications.swift" "$project_root/Tests/OccurrenceEditingTests.swift" -o "$project_root/build/tests/occurrence-editing" -framework UserNotifications
+"$project_root/build/tests/occurrence-editing"
+
+/usr/bin/swiftc -parse-as-library "$project_root/Sources/Domain.swift" "$project_root/Sources/FeishuModels.swift" "$project_root/Sources/CaptureModels.swift" "$project_root/Sources/Store.swift" "$project_root/Tests/CompactFocusTests.swift" -o "$project_root/build/tests/compact-focus"
+"$project_root/build/tests/compact-focus"
