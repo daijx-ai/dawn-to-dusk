@@ -39,7 +39,7 @@ Hermes 捕获辅助脚本位于 `Integrations/Hermes/chaoxi-capture/scripts/capt
 
 ## 版本
 
-当前本机安装版本为 **1.1.2 (build 8)**，包含重复事项修改范围与小窗显示模式优化。安装已完成正式入口、数据保留和系统提醒排程回读验证；本轮未更新远程仓库或发布标签。
+当前本机安装版本为 **1.1.2 (build 8)**。对应代码在 GitHub 功能分支 `feature/ai-chaoxi-github-sync`；稳定标签 `v1.1.2` 尚未发布。
 
 ## 许可
 
