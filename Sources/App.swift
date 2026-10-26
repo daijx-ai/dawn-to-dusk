@@ -149,6 +149,7 @@ struct AgendaCaptureReceiver {
         var directory: URL?
         if let idx = args.firstIndex(of: "--data-dir"), args.indices.contains(idx + 1) { directory = URL(fileURLWithPath: args[idx + 1]) }
         store = AgendaStore(directory: directory)
+        Localization.language = store.settings.language
         feishuSync = FeishuSyncCoordinator(store: store, qa: qa)
         notifications = NotificationService(simulated: qa)
         notifications.evidenceURL = store.fileURL.deletingLastPathComponent().appendingPathComponent("notification-test.json")
@@ -176,7 +177,14 @@ struct AgendaCaptureReceiver {
         notifications.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
         feishuSync.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
         store.$items.dropFirst().sink { [weak self] _ in DispatchQueue.main.async { self?.syncReminders(); self?.refreshStatus() } }.store(in: &subscriptions)
-        store.$settings.dropFirst().removeDuplicates().sink { [weak self] _ in DispatchQueue.main.async { self?.applyAppearance(); self?.applyWindowMode(); self?.resizePanel(); self?.syncReminders() } }.store(in: &subscriptions)
+        store.$settings.dropFirst().removeDuplicates().sink { [weak self] settings in
+            let changedLanguage = Localization.language != settings.language
+            Localization.language = settings.language
+            DispatchQueue.main.async {
+                if changedLanguage { self?.createMenu(); self?.refreshLogin(); self?.notifications.refreshPermission(); self?.refreshStatus() }
+                self?.applyAppearance(); self?.applyWindowMode(); self?.resizePanel(); self?.syncReminders()
+            }
+        }.store(in: &subscriptions)
         store.$selectedDay.dropFirst().sink { [weak self] day in self?.selectedToday = AgendaClock.dayKey(day) == AgendaClock.dayKey(Date()) }.store(in: &subscriptions)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(woke), name: NSWorkspace.didWakeNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(screenChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -197,7 +205,7 @@ struct AgendaCaptureReceiver {
         if UserDefaults.standard.object(forKey: glassEnabledKey) != nil { glassEnabled = UserDefaults.standard.bool(forKey: glassEnabledKey) }
         let size = NSSize(width: 400, height: panelCompact ? 82 : 850)
         panel = AgendaPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel, .resizable], backing: .buffered, defer: false)
-        panel.title = qa ? "朝夕 · 隔离验收" : "朝夕 · 日程"; panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true
+        panel.title = qa ? L("朝夕 · 隔离验收") : L("朝夕 · 日程"); panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true
         panel.isMovableByWindowBackground = true; panel.hidesOnDeactivate = false; panel.becomesKeyOnlyIfNeeded = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]; panel.delegate = self; panel.isReleasedWhenClosed = false
         let container = NSView(frame: NSRect(origin: .zero, size: size))
@@ -218,17 +226,17 @@ struct AgendaCaptureReceiver {
     private func createMenu() {
         let root = NSMenu()
         let appItem = NSMenuItem(); root.addItem(appItem)
-        let appMenu = NSMenu(title: "朝夕"); appItem.submenu = appMenu
-        let quit = NSMenuItem(title: "退出朝夕", action: #selector(quitApp), keyEquivalent: "q"); quit.target = self; appMenu.addItem(quit)
+        let appMenu = NSMenu(title: L("朝夕")); appItem.submenu = appMenu
+        let quit = NSMenuItem(title: L("退出朝夕"), action: #selector(quitApp), keyEquivalent: "q"); quit.target = self; appMenu.addItem(quit)
         let fileItem = NSMenuItem(); root.addItem(fileItem)
-        let fileMenu = NSMenu(title: "日程"); fileItem.submenu = fileMenu
-        for (title, action, key) in [("添加待办", #selector(newItem), "n"), ("展开日程", #selector(expand), ""), ("隐藏浮窗", #selector(hidePanel), "w")] {
+        let fileMenu = NSMenu(title: L("日程")); fileItem.submenu = fileMenu
+        for (title, action, key) in [(L("添加待办"), #selector(newItem), "n"), (L("展开日程"), #selector(expand), ""), (L("隐藏浮窗"), #selector(hidePanel), "w")] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.target = self; fileMenu.addItem(item)
         }
         let editItem = NSMenuItem(); root.addItem(editItem)
-        let edit = NSMenu(title: "编辑"); editItem.submenu = edit
-        let undo = NSMenuItem(title: "撤销", action: #selector(undoAction), keyEquivalent: "z"); undo.target = self; edit.addItem(undo); edit.addItem(.separator())
-        for (title, selector, key) in [("剪切", "cut:", "x"), ("复制", "copy:", "c"), ("粘贴", "paste:", "v"), ("全选", "selectAll:", "a")] { edit.addItem(NSMenuItem(title: title, action: NSSelectorFromString(selector), keyEquivalent: key)) }
+        let edit = NSMenu(title: L("编辑")); editItem.submenu = edit
+        let undo = NSMenuItem(title: L("撤销"), action: #selector(undoAction), keyEquivalent: "z"); undo.target = self; edit.addItem(undo); edit.addItem(.separator())
+        for (title, selector, key) in [(L("剪切"), "cut:", "x"), (L("复制"), "copy:", "c"), (L("粘贴"), "paste:", "v"), (L("全选"), "selectAll:", "a")] { edit.addItem(NSMenuItem(title: title, action: NSSelectorFromString(selector), keyEquivalent: key)) }
         NSApp.mainMenu = root
     }
     func minimizeToMenu() { hidePanel() }
@@ -298,11 +306,11 @@ struct AgendaCaptureReceiver {
     }
     private func showMenu() {
         let menu = NSMenu()
-        for (title, selector) in [("展开日程", #selector(expand)), ("收起为小窗", #selector(compactPanel)), ("添加待办", #selector(newItem)), ("显示 / 隐藏浮窗", #selector(toggleVisible))] {
+        for (title, selector) in [(L("展开日程"), #selector(expand)), (L("收起为小窗"), #selector(compactPanel)), (L("添加待办"), #selector(newItem)), (L("显示 / 隐藏浮窗"), #selector(toggleVisible))] {
             let item = NSMenuItem(title: title, action: selector, keyEquivalent: ""); item.target = self; menu.addItem(item)
         }
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "退出朝夕", action: #selector(quitApp), keyEquivalent: "q"); quit.target = self; menu.addItem(quit)
+        let quit = NSMenuItem(title: L("退出朝夕"), action: #selector(quitApp), keyEquivalent: "q"); quit.target = self; menu.addItem(quit)
         statusItem.menu = menu; statusItem.button?.performClick(nil); statusItem.menu = nil
     }
     @objc private func compactPanel() { store.settings.compact = true; _ = store.save(); resizePanel(); showPanel() }
@@ -334,7 +342,7 @@ struct AgendaCaptureReceiver {
         applyCaptureReception(reception)
     }
     private func applyCaptureReception(_ reception: AgendaCaptureReception) {
-        if reception.hasInvalidCapture { store.error = "这条待办链接的时间或内容无效，未创建任何安排。" }
+        if reception.hasInvalidCapture { store.error = L("这条待办链接的时间或内容无效，未创建任何安排。") }
         if reception.captureCount > 0 { presentCaptureRequests() }
         else if reception.shouldReveal || reception.hasInvalidCapture { showPanel() }
     }
@@ -358,11 +366,11 @@ struct AgendaCaptureReceiver {
     private func refreshStatus() {
         guard statusItem != nil else { return }
         let next = AgendaClock.next(items: store.items, now: Date())
-        let text = next.flatMap { o in o.due.map { "\(String(o.title.prefix(5))) · \(AgendaClock.timeText($0))" } } ?? "朝夕"
-        statusItem.button?.title = "朝夕"
+        let text = next.flatMap { o in o.due.map { "\(String(o.title.prefix(5))) · \(AgendaClock.timeText($0))" } } ?? L("朝夕")
+        statusItem.button?.title = L("朝夕")
         statusItem.button?.font = .systemFont(ofSize: 11, weight: .medium)
-        statusItem.button?.image = NSImage(systemSymbolName: "sun.horizon", accessibilityDescription: "朝夕日程"); statusItem.button?.imagePosition = .imageLeading
-        statusItem.button?.toolTip = "朝夕 · \(text) · 点击找回日程，右键更多操作"
+        statusItem.button?.image = NSImage(systemSymbolName: "sun.horizon", accessibilityDescription: L("朝夕日程")); statusItem.button?.imagePosition = .imageLeading
+        statusItem.button?.toolTip = L("朝夕 · \(text) · 点击找回日程，右键更多操作")
     }
     @objc private func woke() { notifications.refreshPermission(); syncReminders(force: true); refreshTick(); ensureVisible() }
     @objc private func becameActive() { notifications.refreshPermission(); refreshLogin() }
@@ -377,27 +385,27 @@ struct AgendaCaptureReceiver {
         else { store.selectedDay = o.displayDay; showPanel() }
     }
     func refreshLogin() {
-        if qa { loginText = "隔离验证模式，不修改登录项"; return }
+        if qa { loginText = L("隔离验证模式，不修改登录项"); return }
         let status = SMAppService.mainApp.status
         loginEnabled = status == .enabled
-        loginText = status == .requiresApproval ? "登录项等待系统允许，可在系统设置中开启。" : loginEnabled ? "已登记，登录后打开这台 Mac 上的朝夕。" : "当前未设为登录启动。"
+        loginText = status == .requiresApproval ? L("登录项等待系统允许，可在系统设置中开启。") : loginEnabled ? L("已登记，登录后打开这台 Mac 上的朝夕。") : L("当前未设为登录启动。")
     }
     func setLoginEnabled(_ enabled: Bool) {
         guard !qa else { return }
         do { if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }; refreshLogin() }
-        catch { refreshLogin(); loginText = "登录项设置失败：\(error.localizedDescription)" }
+        catch { refreshLogin(); loginText = L("登录项设置失败：\(error.localizedDescription)") }
     }
     func exportData() {
-        let save = NSSavePanel(); save.nameFieldStringValue = "朝夕日程-\(AgendaClock.dayKey(Date())).json"; save.allowedContentTypes = [.json]
+        let save = NSSavePanel(); save.nameFieldStringValue = L("朝夕日程-\(AgendaClock.dayKey(Date())).json"); save.allowedContentTypes = [.json]
         panel.makeKey(); NSApp.activate(ignoringOtherApps: true)
         save.begin { result in
             guard result == .OK, let target = save.url else { return }
             do { try Data(contentsOf: self.store.fileURL).write(to: target, options: .atomic) }
-            catch { self.store.error = "导出失败：\(error.localizedDescription)" }
+            catch { self.store.error = L("导出失败：\(error.localizedDescription)") }
         }
     }
     func restoreData() {
-        let picker = NSOpenPanel(); picker.allowedContentTypes = [.json]; picker.allowsMultipleSelection = false; picker.message = "选择朝夕导出的日程备份。当前日程会先保留副本，再恢复所选备份。"
+        let picker = NSOpenPanel(); picker.allowedContentTypes = [.json]; picker.allowsMultipleSelection = false; picker.message = L("选择朝夕导出的日程备份。当前日程会先保留副本，再恢复所选备份。")
         panel.makeKey(); NSApp.activate(ignoringOtherApps: true)
         picker.begin { result in
             guard result == .OK, let source = picker.url else { return }
@@ -422,7 +430,7 @@ struct AgendaCaptureReceiver {
             exit(AgendaQueryCLI.run(arguments: Array(args.dropFirst()), productionRoot: productionRoot))
         }
         if args.contains("--help") {
-            print("朝夕 · Mac 常驻日程\n正常使用请打开 朝夕.app。隔离验收：--qa --data-dir <绝对路径>。\n本机捕获：--capture [--dry-run] [--no-launch] [--qa --data-dir <绝对路径>]。\n通过 stdin 传 JSON：request_id、title；可选 note、date（YYYY-MM-DD）、time（HH:mm）、duration_minutes、source（hermes/cli）、repeat_rule（none/daily/weekdays）。无日期进入独立清单，含时刻必须给日期，重复安排须有日期和时刻。\n只读查询：--query [--qa --data-dir <绝对路径>]；stdin JSON 为 {} 或 {\"date\":\"YYYY-MM-DD\"}。默认查询北京时间今天，返回当天日程和全部清单，不启动窗口或修改数据。")
+            print("朝夕 · Mac 常驻日程\n正常使用请打开 朝夕.app。隔离验收：--qa --data-dir <绝对路径>。\n本机捕获：--capture [--dry-run] [--no-launch] [--qa --data-dir <绝对路径>]。\n通过 stdin 传 JSON：request_id、title；可选 note、date（YYYY-MM-DD）、time（HH:mm）、duration_minutes、source（hermes/cli）、repeat_rule（none/daily/weekdays/weekly）。无日期进入独立清单，含时刻必须给日期，重复安排须有日期和时刻。\n只读查询：--query [--qa --data-dir <绝对路径>]；stdin JSON 为 {} 或 {\"date\":\"YYYY-MM-DD\"}。默认查询北京时间今天，返回当天日程和全部清单，不启动窗口或修改数据。")
             return
         }
         if args.contains("--capture") {
@@ -431,30 +439,30 @@ struct AgendaCaptureReceiver {
         let qa = args.contains("--qa")
         let dataIndex = args.firstIndex(of: "--data-dir")
         if qa && (dataIndex == nil || !args.indices.contains(dataIndex! + 1) || !args[dataIndex! + 1].hasPrefix("/")) {
-            fputs("隔离验收必须指定 --qa --data-dir <绝对路径>，未启动应用。\n", stderr); exit(64)
+            fputs(L("隔离验收必须指定 --qa --data-dir <绝对路径>，未启动应用。\n"), stderr); exit(64)
         }
-        if dataIndex != nil && !qa { fputs("自定义数据目录仅用于 --qa 隔离验收，未启动应用。\n", stderr); exit(64) }
+        if dataIndex != nil && !qa { fputs(L("自定义数据目录仅用于 --qa 隔离验收，未启动应用。\n"), stderr); exit(64) }
         for (i, argument) in args.enumerated().dropFirst() {
             if argument != "--qa" && argument != "--data-dir" && i != (dataIndex ?? -2) + 1 { fputs("未知参数，使用 --help 查看支持的入口。未启动应用。\n", stderr); exit(64) }
         }
         var root = productionRoot
         if let i = args.firstIndex(of: "--data-dir"), args.indices.contains(i + 1) { root = URL(fileURLWithPath: args[i + 1]) }
-        if qa && root.resolvingSymlinksInPath().standardizedFileURL == productionRoot.resolvingSymlinksInPath().standardizedFileURL { fputs("隔离验收不能使用正式数据目录，未启动应用。\n", stderr); exit(64) }
+        if qa && root.resolvingSymlinksInPath().standardizedFileURL == productionRoot.resolvingSymlinksInPath().standardizedFileURL { fputs(L("隔离验收不能使用正式数据目录，未启动应用。\n"), stderr); exit(64) }
         if qa {
             do { try AgendaDataPathSafety.validateQA(root, productionRoot: productionRoot) }
-            catch { fputs("隔离数据文件不能使用链接或不安全文件，未启动应用。\n", stderr); exit(64) }
+            catch { fputs(L("隔离数据文件不能使用链接或不安全文件，未启动应用。\n"), stderr); exit(64) }
         }
         let guiLease: AgendaGUILease
         do { guiLease = try AgendaGUILease() }
         catch AgendaGUILease.Failure.occupied {
             if !qa { DistributedNotificationCenter.default().postNotificationName(AgendaGUILease.revealNotification, object: nil, userInfo: nil, deliverImmediately: true) }
-            fputs("朝夕已经在运行，未打开第二个窗口。\n", stderr)
+            fputs(L("朝夕已经在运行，未打开第二个窗口。\n"), stderr)
             return
-        } catch { fputs("无法取得朝夕窗口锁，未启动第二个窗口。\n", stderr); exit(74) }
+        } catch { fputs(L("无法取得朝夕窗口锁，未启动第二个窗口。\n"), stderr); exit(74) }
         do { try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true) }
-        catch { fputs("无法打开朝夕数据目录：\(error.localizedDescription)\n", stderr); return }
+        catch { fputs(L("无法打开朝夕数据目录：\(error.localizedDescription)\n"), stderr); return }
         let lock = Darwin.open(root.appendingPathComponent("app.lock").path, O_CREAT | O_RDWR, 0o600)
-        guard lock >= 0 else { fputs("无法保护本机日程文件\n", stderr); return }
+        guard lock >= 0 else { fputs(L("无法保护本机日程文件\n"), stderr); return }
         guard flock(lock, LOCK_EX | LOCK_NB) == 0 else {
             Darwin.close(lock)
             DistributedNotificationCenter.default().postNotificationName(Notification.Name("com.djx.chaoxi.show"), object: root.path, userInfo: nil, deliverImmediately: true)

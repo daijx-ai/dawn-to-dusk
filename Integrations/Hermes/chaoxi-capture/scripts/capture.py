@@ -94,8 +94,8 @@ def capture(payload, *, environment=None, runner=None, dry_run=False):
         if duration and not payload.get("time"):
             raise ValueError("无时刻时 duration_minutes 只能为 0")
         repeat = payload.get("repeat_rule", "none")
-        if repeat not in ("none", "daily", "weekdays"):
-            raise ValueError("repeat_rule 只能为 none、daily 或 weekdays")
+        if repeat not in ("none", "daily", "weekdays", "weekly"):
+            raise ValueError("repeat_rule 只能为 none、daily、weekdays 或 weekly")
         if repeat != "none" and not (payload.get("date") and payload.get("time")):
             raise ValueError("重复安排必须有明确 date 和 time")
         outgoing = {key: value for key, value in payload.items() if key != "entry_index"}
@@ -207,7 +207,7 @@ def query(payload, *, environment=None, runner=None):
             if not isinstance(occurrence_id, str) or not occurrence_id.lower().startswith(item_id + ":"):
                 raise ValueError()
             _day(occurrence_id[len(item_id) + 1:])
-            if _day(row.get("date")) != day or row.get("repeat_rule") not in ("none", "daily", "weekdays"):
+            if _day(row.get("date")) != day or row.get("repeat_rule") not in ("none", "daily", "weekdays", "weekly"):
                 raise ValueError()
             for key in ("time", "base_time"):
                 if key not in row or (row[key] is not None and (not isinstance(row[key], str) or re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", row[key]) is None)):

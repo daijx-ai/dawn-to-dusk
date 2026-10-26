@@ -14,8 +14,10 @@ cat > "$app_path/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>com.djx.chaoxi</string>
 <key>CFBundleExecutable</key><string>Chaoxi</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.1.2</string>
-<key>CFBundleVersion</key><string>5</string>
+<key>CFBundleShortVersionString</key><string>1.2.0</string>
+<key>CFBundleVersion</key><string>13</string>
+<key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
+<key>CFBundleLocalizations</key><array><string>zh-Hans</string><string>en</string></array>
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
@@ -27,6 +29,7 @@ PLIST
 /usr/bin/iconutil -c icns "$build_root/AppIcon.iconset" -o "$app_path/Contents/Resources/AppIcon.icns"
 /usr/bin/python3 "$project_root/scripts/sound.py" "$app_path/Contents/Resources/soft.wav"
 cp "$project_root/Resources/Maccy-LICENSE.txt" "$app_path/Contents/Resources/Maccy-LICENSE.txt"
+cp -R "$project_root/Resources/en.lproj" "$app_path/Contents/Resources/"
 /usr/bin/codesign --force --deep --sign - "$app_path"
 /usr/bin/codesign --verify --deep --strict "$app_path"
 print -r -- "$app_path"

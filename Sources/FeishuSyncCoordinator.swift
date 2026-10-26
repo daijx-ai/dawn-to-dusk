@@ -4,7 +4,20 @@ import Combine
 @MainActor final class FeishuSyncCoordinator: ObservableObject {
     typealias Fetch = (Date, Date, @escaping @Sendable (String) async -> [String]) async throws -> FeishuSnapshot
     @Published private(set) var busy = false
-    @Published private(set) var statusText = "未开启同步"
+    private enum Status { case off, paused, testing, loading, synced(Date), saveFailed, failed(FeishuReadError?) }
+    @Published private var status = Status.off
+    var statusText: String {
+        switch status {
+        case .off: return L("未开启同步")
+        case .paused: return L("已暂停，保留已同步日程")
+        case .testing: return L("隔离验收不连接飞书")
+        case .loading: return L("正在读取飞书日程…")
+        case .synced(let date): return L("已同步 · ") + AgendaClock.timeText(date) + L("，每 5 分钟更新")
+        case .saveFailed: return L("同步未保存，请检查朝夕数据状态") + failureSuffix
+        case .failed(let reason): return (reason?.localizedDescription ?? L("读取失败，已保留上次日程；请检查飞书登录与网络")) + failureSuffix
+        }
+    }
+    private var failureSuffix: String { failures >= 3 ? L("。连续失败，点立即同步后重试") : "" }
     private let store: AgendaStore
     private let qa: Bool
     private var task: Task<Void, Never>?
@@ -24,21 +37,21 @@ import Combine
     func setEnabled(_ enabled: Bool) {
         store.settings.feishuSyncEnabled = enabled
         guard store.save() else { return }
-        if !enabled { cancel(); statusText = "已暂停，保留已同步日程" }
+        if !enabled { cancel(); status = .paused }
         else { tick(force: true) }
     }
 
     func tick(force: Bool = false) {
         guard store.settings.feishuSyncEnabled == true else {
             cancel()
-            if !statusText.hasPrefix("已暂停") { statusText = "未开启同步" }
+            if case .paused = status { } else { status = .off }
             return
         }
-        guard !qa else { statusText = "隔离验收不连接飞书"; return }
+        guard !qa else { status = .testing; return }
         guard !busy else { return }
         if force { failures = 0; nextAttempt = .distantPast }
         guard failures < 3, now() >= nextAttempt else { return }
-        busy = true; statusText = "正在读取飞书日程…"
+        busy = true; status = .loading
         let ticket = UUID(); generation = ticket
         let window = FeishuReader.defaultWindow(now: now())
         let targetStore = store
@@ -50,24 +63,24 @@ import Combine
                 }
                 guard !Task.isCancelled, self.generation == ticket, self.store.settings.feishuSyncEnabled == true else { return }
                 guard self.store.applyFeishuSnapshot(snapshot) else {
-                    self.failed("同步未保存，请检查朝夕数据状态")
+                    self.failed(nil, saveFailed: true)
                     return
                 }
                 self.failures = 0
                 self.nextAttempt = self.now().addingTimeInterval(300)
-                self.statusText = "已同步 · " + AgendaClock.timeText(self.now()) + "，每 5 分钟更新"
+                self.status = .synced(self.now())
             } catch {
                 guard !Task.isCancelled, self.generation == ticket else { return }
-                self.failed((error as? FeishuReadError)?.localizedDescription ?? "读取失败，已保留上次日程；请检查飞书登录与网络")
+                self.failed(error as? FeishuReadError)
             }
             if self.generation == ticket { self.busy = false; self.task = nil }
         }
     }
 
-    private func failed(_ message: String) {
+    private func failed(_ reason: FeishuReadError?, saveFailed: Bool = false) {
         failures += 1; busy = false; task = nil
         nextAttempt = now().addingTimeInterval(300)
-        statusText = message + (failures >= 3 ? "。连续失败，点立即同步后重试" : "")
+        status = saveFailed ? .saveFailed : .failed(reason)
     }
     private func cancel() { generation = UUID(); task?.cancel(); task = nil; busy = false }
 }

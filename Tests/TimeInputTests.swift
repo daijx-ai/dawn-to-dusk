@@ -1,4 +1,6 @@
 import Foundation
+import AppKit
+import SwiftUI
 
 // Only compile-time palette enums are substituted in the isolated harness.
 // The real Appearance.swift and TimeInput.swift are compiled unchanged.
@@ -7,8 +9,14 @@ enum AgendaAppearanceMode { case light, dark, system }
 enum AgendaAccentColor { case green, blue, purple, orange, graphite }
 #endif
 
+@MainActor private final class ReactiveClock: ObservableObject { @Published var text = "00:30" }
+private struct ReactiveTimeInput: View {
+    @ObservedObject var clock: ReactiveClock
+    var body: some View { TimeInput(text: $clock.text, label: "键盘验收") }
+}
+
 @main struct TimeInputTests {
-    static func main() {
+    @MainActor static func main() {
         var checked = 0
         func expect(_ condition: Bool, _ message: String) {
             checked += 1
@@ -50,6 +58,109 @@ enum AgendaAccentColor { case green, blue, purple, orange, graphite }
         expect(TimeInputValue("").adjusting(.minute, by: 1) == ":00", "Explicit minute choice leaves hour unset")
         expect(TimeInputValue("23:59").adjusting(.minute, by: Int.max) == "23:59", "Large scroll step stays bounded")
         expect(TimeInputValue("00:00").adjusting(.hour, by: Int.min) == "00:00", "Large negative step stays bounded")
+        // Dispatch wheel events to the actual native fields. This caught the
+        // hover-to-edit bug, including when one gesture crosses several rows.
+        _ = NSApplication.shared
+        var clocks = ["23:30", "07:30"]
+        let originalClocks = clocks
+        let host = NSHostingView(rootView: VStack {
+            TimeInput(text: Binding(get: { clocks[0] }, set: { clocks[0] = $0 }), label: "睡觉")
+            TimeInput(text: Binding(get: { clocks[1] }, set: { clocks[1] = $0 }), label: "起床")
+        })
+        let window = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 320, height: 200), styleMask: .borderless, backing: .buffered, defer: false)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        func controls(in view: NSView) -> [NSControl] {
+            (view as? NSControl).map { [$0] } ?? view.subviews.flatMap { controls(in: $0) }
+        }
+        let actualControls = controls(in: host)
+        let fields = actualControls.compactMap { $0 as? NSTextField }.filter { $0.isEditable }
+        expect(fields.count == 4, "Exercise both real hour/minute fields in two rows")
+        for control in actualControls {
+            for units in [CGScrollEventUnit.pixel, .line] {
+                for delta: Int32 in [40, -40] {
+                    let cg = CGEvent(scrollWheelEvent2Source: nil, units: units, wheelCount: 1, wheel1: delta, wheel2: 0, wheel3: 0)!
+                    control.scrollWheel(with: NSEvent(cgEvent: cg)!)
+                    expect(clocks == originalClocks, "Wheel must never edit any time, including across multiple fields")
+                }
+            }
+        }
+        let sleepHour = fields.first { $0.accessibilityLabel() == "睡觉，小时" }!
+        sleepHour.stringValue = "0023"
+        sleepHour.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: sleepHour))
+        expect(sleepHour.stringValue == "23" && clocks[0] == "23:30", "Appending 23 to 00 displays and binds hour 23")
+        sleepHour.stringValue = "0025"
+        sleepHour.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: sleepHour))
+        expect(sleepHour.stringValue == "25" && minutes(clocks[0]) == nil, "Out-of-range hours remain visibly invalid, never silently clamped")
+        sleepHour.stringValue = "7"
+        sleepHour.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: sleepHour))
+        sleepHour.delegate?.controlTextDidEndEditing?(Notification(name: NSControl.textDidEndEditingNotification, object: sleepHour))
+        expect(sleepHour.stringValue == "07" && clocks[0] == "07:30", "Single digit pads on blur and preserves minute")
+        let editor = NSTextView()
+        _ = sleepHour.delegate?.control?(sleepHour, textView: editor, doCommandBy: NSSelectorFromString("moveUp:"))
+        expect(clocks[0] == "06:30", "Actual Up key delegate reduces the hour")
+        _ = sleepHour.delegate?.control?(sleepHour, textView: editor, doCommandBy: NSSelectorFromString("moveDown:"))
+        expect(clocks[0] == "07:30", "Actual Down key delegate increases the hour")
+        sleepHour.stringValue = ""
+        sleepHour.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: sleepHour))
+        expect(clocks[0] == ":30" && TimeInputValue(clocks[0]).minutes == 30, "Deleting every digit stays editable and means zero")
+        sleepHour.stringValue = "23"
+        sleepHour.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: sleepHour))
+        expect(clocks[0] == "23:30", "Typing into a cleared field is direct, with no forced leading zero")
+        sleepHour.stringValue = ""
+        sleepHour.delegate?.controlTextDidEndEditing?(Notification(name: NSControl.textDidEndEditingNotification, object: sleepHour))
+        expect(sleepHour.stringValue == "00" && clocks[0] == "00:30", "Blank normalizes to 00 when editing ends")
+        expect(TimeInputValue(":").minutes == 0 && TimeInputValue("23:").minutes == 1380, "Blank components are zero")
+        expect(TimeInputValue("24:00").minutes == nil && TimeInputValue("23:60").minutes == nil, "Wheel ranges match valid clock input")
+        let hours = ClockWheelScrollView(); hours.frame = NSRect(x: 0, y: 0, width: 72, height: 150); hours.configure(range: 0...23)
+        let minuteWheel = ClockWheelScrollView(); minuteWheel.frame = NSRect(x: 0, y: 0, width: 72, height: 150); minuteWheel.configure(range: 0...59)
+        window.contentView?.addSubview(hours); window.contentView?.addSubview(minuteWheel)
+        hours.layoutSubtreeIfNeeded(); minuteWheel.layoutSubtreeIfNeeded()
+        var wheelHour = 0, wheelMinute = 30
+        hours.onSelect = { wheelHour = $0 }; minuteWheel.onSelect = { wheelMinute = $0 }
+        hours.display(0); minuteWheel.display(30)
+        hours.select(23, animated: true)
+        expect(wheelHour == 23 && wheelMinute == 30, "Hour wheel changes only its own component")
+        minuteWheel.select(59, animated: true)
+        expect(wheelHour == 23 && wheelMinute == 59, "Minute wheel changes only its own component")
+        hours.select(24, animated: true); minuteWheel.select(60, animated: true)
+        expect(wheelHour == 23 && wheelMinute == 59, "Native wheels cannot choose 24 or 60")
+        hours.select(-1, animated: true); minuteWheel.select(-1, animated: true)
+        expect(wheelHour == 0 && wheelMinute == 0, "Native wheel lower boundary is 00")
+        hours.contentView.scroll(to: NSPoint(x: 0, y: 9 * 30))
+        expect(wheelHour == 9 && wheelMinute == 0, "Actual clip scrolling chooses the centered hour without altering minutes")
+        let mounting = ClockWheelScrollView()
+        mounting.configure(range: 0...59)
+        var mountedMinute = 30
+        mounting.onSelect = { mountedMinute = $0 }
+        mounting.display(30)
+        mounting.frame = NSRect(x: 0, y: 0, width: 72, height: 150)
+        window.contentView?.addSubview(mounting)
+        mounting.layoutSubtreeIfNeeded()
+        expect(mountedMinute == 30 && mounting.accessibilityValue() as? String == "30", "Mounting a picker at a nonzero value must never reset it to 00")
+        let wheelEvent = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: -1, wheel2: 0, wheel3: 0)!
+        hours.scrollWheel(with: NSEvent(cgEvent: wheelEvent)!)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        expect(wheelHour > 9 && wheelMinute == 0, "Real scroll-wheel events change only the selected hour wheel")
+        let reactive = ReactiveClock()
+        let typingHost = NSHostingView(rootView: ReactiveTimeInput(clock: reactive))
+        let typingWindow = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 250, height: 80), styleMask: .borderless, backing: .buffered, defer: false)
+        typingWindow.contentView = typingHost; typingHost.layoutSubtreeIfNeeded()
+        let reactiveHour = controls(in: typingHost).compactMap { $0 as? NSTextField }.first { $0.accessibilityLabel() == "键盘验收，小时" }!
+        expect(typingWindow.makeFirstResponder(reactiveHour), "Use a real AppKit field editor for reactive typing")
+        let typingEditor = reactiveHour.currentEditor() as! NSTextView
+        typingEditor.setSelectedRange(NSRange(location: 0, length: typingEditor.string.utf16.count))
+        typingEditor.insertText("2", replacementRange: typingEditor.selectedRange())
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        typingEditor.insertText("3", replacementRange: typingEditor.selectedRange())
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        expect(typingEditor.string == "23" && reactive.text == "23:30", "Sequential keyboard digits survive SwiftUI rerenders without reversing or duplicating")
+        typingEditor.setSelectedRange(NSRange(location: 0, length: typingEditor.string.utf16.count))
+        typingEditor.deleteBackward(nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        expect(typingEditor.string.isEmpty && TimeInputValue(reactive.text).minutes == 30, "Deleting all text remains empty while editing and means 00")
+        typingWindow.makeFirstResponder(nil)
+        expect(reactiveHour.stringValue == "00", "Leaving a cleared reactive field displays 00")
         print("Time input: \(checked) checks passed")
     }
 }

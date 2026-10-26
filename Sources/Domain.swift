@@ -4,7 +4,7 @@ import CoreGraphics
 enum AgendaAppearanceMode: String, CaseIterable {
     case light, dark, system
     var label: String {
-        switch self { case .light: return "浅色"; case .dark: return "深色"; case .system: return "跟随系统" }
+        switch self { case .light: return L("浅色"); case .dark: return L("深色"); case .system: return L("跟随系统") }
     }
 }
 
@@ -12,19 +12,19 @@ enum AgendaAccentColor: String, CaseIterable {
     case green, blue, purple, orange, graphite
     var label: String {
         switch self {
-        case .green: return "松绿"
-        case .blue: return "海蓝"
-        case .purple: return "雾紫"
-        case .orange: return "暖橙"
-        case .graphite: return "石墨"
+        case .green: return L("松绿")
+        case .blue: return L("海蓝")
+        case .purple: return L("雾紫")
+        case .orange: return L("暖橙")
+        case .graphite: return L("石墨")
         }
     }
 }
 
 enum RepeatRule: String, Codable, CaseIterable {
-    case none, daily, weekdays
+    case none, daily, weekdays, weekly
     var label: String {
-        switch self { case .none: return "不重复"; case .daily: return "每天"; case .weekdays: return "工作日" }
+        switch self { case .none: return L("不重复"); case .daily: return L("每天"); case .weekdays: return L("工作日"); case .weekly: return L("每周") }
     }
 }
 
@@ -41,6 +41,9 @@ struct AgendaItem: Codable, Identifiable, Equatable {
     var isTentative: Bool = false
     var reminderEnabled: Bool = true
     var repeatRule: RepeatRule = .none
+    // Calendar weekday (1 = Sunday ... 7 = Saturday) -> minute of day.
+    // Nil retains the existing single-time repeat behavior.
+    var weeklyTimes: [String: Int]? = nil
     var completedDays: Set<String> = []
     var snoozes: [String: Date] = [:]
     var postponedTimes: [String: Date]? = nil
@@ -48,6 +51,12 @@ struct AgendaItem: Codable, Identifiable, Equatable {
     var feishu: FeishuMetadata? = nil
     var isChecklist: Bool { checklistState != nil }
     var scheduledDay: Date? { isChecklist ? nil : date }
+    func timeMinutes(on day: Date) -> Int? {
+        if repeatRule == .weekly, let weeklyTimes {
+            return weeklyTimes[String(AgendaClock.calendar.component(.weekday, from: day))]
+        }
+        return timeMinutes
+    }
 }
 
 struct Occurrence: Identifiable {
@@ -105,16 +114,16 @@ enum AgendaClock {
     }
     static func countdown(to date: Date, now: Date) -> String {
         let delta = date.timeIntervalSince(now)
-        guard abs(delta) > 1 else { return "刚刚" }
-        let suffix = delta < 0 ? "前" : ""
+        guard abs(delta) > 1 else { return L("刚刚") }
+        let suffix = delta < 0 ? L("前") : ""
         let seconds = Int(ceil(abs(delta)))
-        if seconds < 60 { return "\(seconds) 秒" + suffix }
+        if seconds < 60 { return L("\(seconds) 秒") + suffix }
         let minutes = Int(ceil(abs(delta) / 60))
-        if minutes < 60 { return "\(minutes) 分钟" + suffix }
+        if minutes < 60 { return L("\(minutes) 分钟") + suffix }
         let hours = minutes / 60, rest = minutes % 60
-        if hours < 24 { return (rest == 0 ? "\(hours) 小时" : "\(hours) 小时 \(rest) 分钟") + suffix }
+        if hours < 24 { return (rest == 0 ? L("\(hours) 小时") : L("\(hours) 小时 \(rest) 分钟")) + suffix }
         let days = hours / 24, remaining = hours % 24
-        return (remaining == 0 ? "\(days) 天" : "\(days) 天 \(remaining) 小时") + suffix
+        return (remaining == 0 ? L("\(days) 天") : L("\(days) 天 \(remaining) 小时")) + suffix
     }
     private static func baseOccurrences(items: [AgendaItem], on date: Date) -> [Occurrence] {
         let day = startOfDay(date)
@@ -129,11 +138,14 @@ enum AgendaClock {
             switch item.repeatRule {
             case .none: guard day == anchor else { return nil }
             case .daily: break
+            case .weekly:
+                if let times = item.weeklyTimes { guard times[String(calendar.component(.weekday, from: day))] != nil else { return nil } }
+                else { guard calendar.component(.weekday, from: day) == calendar.component(.weekday, from: anchor) else { return nil } }
             case .weekdays:
                 let weekday = calendar.component(.weekday, from: day)
                 guard (2...6).contains(weekday) else { return nil }
             }
-            let due = item.timeMinutes.flatMap { minutes -> Date? in
+            let due = item.timeMinutes(on: day).flatMap { minutes -> Date? in
                 guard (0...1439).contains(minutes) else { return nil }
                 return calendar.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: day)
             }
@@ -302,9 +314,10 @@ struct CompactAgendaTimeline {
     let rows: [Occurrence]
     let day: Date
     let now: Date
-    let rowPitch: Double = 56
+    let rowPitch: Double
     let nowGap: Double = 40
-    init(rows: [Occurrence], day: Date, now: Date) {
+    init(rows: [Occurrence], day: Date, now: Date, rowPitch: Double = 56) {
+        self.rowPitch = rowPitch
         self.rows = rows.filter { $0.due != nil }.sorted {
             if $0.due != $1.due { return $0.due! < $1.due! }
             return $0.id < $1.id
@@ -326,5 +339,51 @@ struct CompactAgendaTimeline {
     var elapsedHeight: Double {
         if let nowY { return nowY }
         return now < day ? 0 : height
+    }
+}
+
+/// A clock string stays invalid until the user corrects it; no date is involved.
+struct TimeInputValue {
+    enum Part: Hashable { case hour, minute }
+    let hour: String
+    let minute: String
+    private let hasSeparator: Bool
+
+    init(_ text: String) {
+        let pieces = text.split(separator: ":", omittingEmptySubsequences: false)
+        hasSeparator = pieces.count == 2
+        if pieces.count == 2 { hour = String(pieces[0]); minute = String(pieces[1]) }
+        else { hour = text; minute = "" }
+    }
+    func text(for part: Part) -> String { part == .hour ? hour : minute }
+    static func range(for part: Part) -> ClosedRange<Int> { part == .hour ? 0...23 : 0...59 }
+    static func number(_ text: String, for part: Part) -> Int? {
+        guard let number = Int(text.isEmpty ? "0" : text), range(for: part).contains(number) else { return nil }
+        return number
+    }
+    var minutes: Int? {
+        guard hasSeparator, let h = Self.number(hour, for: .hour), let m = Self.number(minute, for: .minute) else { return nil }
+        return h * 60 + m
+    }
+    static func normalizedNumberInput(_ text: String) -> String {
+        guard text.count > 2, text.first == "0", text.allSatisfy({ $0 >= "0" && $0 <= "9" }) else { return text }
+        let digits = text.drop(while: { $0 == "0" })
+        return digits.isEmpty ? "00" : String(digits)
+    }
+    func replacing(_ part: Part, with text: String) -> String {
+        part == .hour ? text + ":" + minute : hour + ":" + text
+    }
+    func adjusting(_ part: Part, by step: Int) -> String? {
+        guard step != 0 else { return nil }
+        let text = self.text(for: part)
+        let range = Self.range(for: part)
+        let next: Int
+        if text.isEmpty { next = 0 }
+        else {
+            guard let number = Self.number(text, for: part) else { return nil }
+            let boundedStep = min(range.upperBound, max(-range.upperBound, step))
+            next = min(range.upperBound, max(range.lowerBound, number + boundedStep))
+        }
+        return replacing(part, with: String(format: "%02d", next))
     }
 }

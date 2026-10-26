@@ -382,7 +382,8 @@ import Darwin
         try expect(!store.postpone(o, until: now, now: now) && !store.postpone(o, until: Date(timeIntervalSince1970: .nan), now: now), "reject old and nonfinite target times")
         try expect((try Data(contentsOf: store.fileURL)) == rejectionBytes, "failed postponements preserve bytes")
         var invalid = original; invalid.id = UUID(); invalid.postponedTimes = ["2026-10-12": date(2026, 10, 12, 18)]
-        try expect(!store.upsert(invalid), "reject persisted postponement before original time")
+        try expect(store.upsert(invalid), "explicit single-occurrence edits may be earlier than the base time")
+        store.undo()
         invalid.postponedTimes = ["2026-10-11": date(2026, 10, 12, 21)]
         try expect(!store.upsert(invalid), "reject override without a valid original occurrence")
         let checklist = AgendaItem(title: "独立清单", date: date(), reminderEnabled: false, checklistState: .pending)
@@ -846,7 +847,7 @@ import Darwin
         let repeatWire = try JSONDecoder().decode(AgendaCaptureRequest.self, from: Data("{\"request_id\":\"repeat-wire\",\"title\":\"背诵\",\"date\":\"2026-10-13\",\"time\":\"22:30\",\"duration_minutes\":30,\"repeat_rule\":\"daily\"}".utf8))
         try expect((try repeatWire.makeItem(now: now)).repeatRule == .daily, "snake-case repeat rule decodes into actual recurring item")
         do {
-            _ = try JSONDecoder().decode(AgendaCaptureRequest.self, from: Data("{\"request_id\":\"bad-repeat\",\"title\":\"任务\",\"repeat_rule\":\"weekly\"}".utf8))
+            _ = try JSONDecoder().decode(AgendaCaptureRequest.self, from: Data("{\"request_id\":\"bad-repeat\",\"title\":\"任务\",\"repeat_rule\":\"monthly\"}".utf8))
             throw Failure(message: "unknown capture repeat rule must reject")
         } catch is DecodingError { }
         let longNote = AgendaCaptureRequest(requestID: "long-note", title: "完整备注", note: String(repeating: "字", count: 2000), source: "hermes")

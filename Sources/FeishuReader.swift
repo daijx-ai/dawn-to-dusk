@@ -6,15 +6,15 @@ enum FeishuReadError: LocalizedError {
     case invalidWindow, malformed, partial, permission, timeout, processFailed, dependencyUnavailable, tooLarge, accountChanged
     var errorDescription: String? {
         switch self {
-        case .invalidWindow: return "飞书同步时间范围无效，原日程未更新。"
-        case .malformed: return "飞书日程数据无法完整解析，原日程未更新。"
-        case .partial: return "有飞书日程尚未核实，原日程未更新。"
-        case .permission: return "飞书日历读取权限或登录态不可用，原日程未更新。"
-        case .timeout: return "读取飞书日程超时，原日程未更新。"
-        case .processFailed: return "飞书只读工具未完成，原日程未更新。"
-        case .dependencyUnavailable: return "飞书同步所需的 Node 或 lark-cli 不可用，请检查本机工具安装；原日程未更新。"
-        case .tooLarge: return "飞书返回的数据过大，原日程未更新。"
-        case .accountChanged: return "飞书主日历身份不一致，原日程未更新。"
+        case .invalidWindow: return L("飞书同步时间范围无效，原日程未更新。")
+        case .malformed: return L("飞书日程数据无法完整解析，原日程未更新。")
+        case .partial: return L("有飞书日程尚未核实，原日程未更新。")
+        case .permission: return L("飞书日历读取权限或登录态不可用，原日程未更新。")
+        case .timeout: return L("读取飞书日程超时，原日程未更新。")
+        case .processFailed: return L("飞书只读工具未完成，原日程未更新。")
+        case .dependencyUnavailable: return L("飞书同步所需的 Node 或 lark-cli 不可用，请检查本机工具安装；原日程未更新。")
+        case .tooLarge: return L("飞书返回的数据过大，原日程未更新。")
+        case .accountChanged: return L("飞书主日历身份不一致，原日程未更新。")
         }
     }
 }

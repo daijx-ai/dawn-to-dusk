@@ -128,11 +128,13 @@ class HermesCaptureTests(unittest.TestCase):
         self.assertTrue(first["saved"])
         self.send(dict(payload, repeat_rule="weekdays"))
         self.assertEqual(json.loads(self.calls[-1][1]["input"])["repeat_rule"], "weekdays")
+        self.send(dict(payload, repeat_rule="weekly"))
+        self.assertEqual(json.loads(self.calls[-1][1]["input"])["repeat_rule"], "weekly")
 
     def test_repeat_without_date_or_time_and_unknown_repeat_fail_before_process(self):
         for payload in ({"title": "任务", "repeat_rule": "daily"},
                         {"title": "任务", "date": "2026-10-13", "repeat_rule": "weekdays"},
-                        {"title": "任务", "date": "2026-10-13", "time": "09:00", "repeat_rule": "weekly"},
+                        {"title": "任务", "date": "2026-10-13", "time": "09:00", "repeat_rule": "monthly"},
                         {"title": "任务", "repeat_rule": None}, {"title": "任务", "repeat_rule": True}):
             self.assertFalse(self.send(payload)["ok"])
         self.assertEqual(self.calls, [])
@@ -201,6 +203,13 @@ class HermesCaptureTests(unittest.TestCase):
         self.assertIsNone(result["schedule"][0]["time"])
         self.assertTrue(result["schedule"][0]["completed"])
 
+    def test_weekly_query_is_readable(self):
+        response = self.query_response()
+        response["schedule"][0]["repeat_rule"] = "weekly"
+        result = self.read(runner=self.query_runner(response))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["schedule"][0]["repeat_rule"], "weekly")
+
     def test_query_keeps_multiday_source_durations_but_capture_limit_stays_one_day(self):
         for duration in (0, 1440, 2880, 4320, 2**63 - 1):
             response = self.query_response(); response["schedule"][0]["duration_minutes"] = duration
@@ -242,7 +251,7 @@ class HermesCaptureTests(unittest.TestCase):
             self.assertFalse(self.read({"date": "2026-10-13"}, runner=self.query_runner(response))["ok"])
         for update in ({"id": "bad"}, {"occurrence_id": ITEM_ID + ":2026-02-30"},
                        {"base_time": "24:00"}, {"time": "9:00"}, {"duration_minutes": True},
-                       {"completed": 0}, {"tentative": None}, {"repeat_rule": "weekly"}, {"date": "2026-10-14"}):
+                       {"completed": 0}, {"tentative": None}, {"repeat_rule": "monthly"}, {"date": "2026-10-14"}):
             response = self.query_response(); response["schedule"][0].update(update)
             self.assertFalse(self.read(runner=self.query_runner(response))["ok"])
 

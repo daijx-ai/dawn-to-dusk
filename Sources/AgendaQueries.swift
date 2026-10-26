@@ -123,7 +123,7 @@ enum AgendaQueryReader {
         let date = AgendaClock.dayKey(selectedDay)
         let schedule = AgendaClock.occurrences(items: document.items, on: selectedDay).map { occurrence in
             AgendaQueryScheduleRow(id: occurrence.item.id, occurrenceID: occurrence.id, title: occurrence.title, date: date,
-                                   time: occurrence.due.map(AgendaClock.timeText), baseTime: occurrence.item.timeMinutes.map { String(format: "%02d:%02d", $0 / 60, $0 % 60) },
+                                   time: occurrence.due.map(AgendaClock.timeText), baseTime: occurrence.item.timeMinutes(on: occurrence.day).map { String(format: "%02d:%02d", $0 / 60, $0 % 60) },
                                    durationMinutes: occurrence.item.durationMinutes, repeatRule: occurrence.item.repeatRule,
                                    completed: occurrence.isCompleted, tentative: occurrence.item.isTentative)
         }
@@ -139,6 +139,11 @@ enum AgendaQueryReader {
             guard !item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, item.title.count <= 200, item.note.count <= 2000,
                   FeishuMetadata.validDate(item.date), item.timeMinutes.map({ (0...1439).contains($0) }) ?? true,
                   item.durationMinutes >= 0, item.feishu != nil || item.durationMinutes <= 1440 else { throw AgendaQueryError.invalidDocument }
+            if let times = item.weeklyTimes {
+                guard item.repeatRule == .weekly, !item.isChecklist, item.feishu == nil,
+                      item.timeMinutes != nil, !times.isEmpty,
+                      times.allSatisfy({ key, value in ["1", "2", "3", "4", "5", "6", "7"].contains(key) && (0...1439).contains(value) }) else { throw AgendaQueryError.invalidDocument }
+            }
             if let source = item.feishu {
                 do { try source.validate() } catch { throw AgendaQueryError.invalidDocument }
                 guard !item.isChecklist, item.repeatRule == .none, !item.isTentative, (item.postponedTimes ?? [:]).isEmpty,
@@ -156,7 +161,7 @@ enum AgendaQueryReader {
                 var original = item
                 original.postponedTimes = nil
                 guard FeishuMetadata.validDate(target), let occurrence = AgendaClock.occurrence(items: [original], id: item.id.uuidString + ":" + key),
-                      let due = occurrence.due, target > due else { throw AgendaQueryError.invalidDocument }
+                      occurrence.due != nil else { throw AgendaQueryError.invalidDocument }
             }
         }
     }

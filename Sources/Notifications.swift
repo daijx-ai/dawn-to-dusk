@@ -66,7 +66,7 @@ enum ReminderPlanner {
 
 @MainActor final class NotificationService: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     @Published var authorized = false
-    @Published var permissionText = "正在检查通知权限…"
+    @Published var permissionText = L("正在检查通知权限…")
     @Published var pendingCount = 0
     @Published var deferredCount = 0
     @Published var testStatus = ""
@@ -83,25 +83,28 @@ enum ReminderPlanner {
     init(simulated: Bool = false) {
         self.simulated = simulated
         super.init()
-        if simulated { permissionText = "隔离验证模式 · 不发送真实通知"; return }
+        if simulated { permissionText = L("隔离验证模式 · 不发送真实通知"); return }
         center.delegate = self
-        let done = UNNotificationAction(identifier: "done", title: "已完成", options: [])
-        let later = UNNotificationAction(identifier: "snooze", title: "10 分钟后提醒", options: [])
-        center.setNotificationCategories([UNNotificationCategory(identifier: "agenda", actions: [done, later], intentIdentifiers: [], options: [])])
         refreshPermission()
     }
+    private func configureActions() {
+        let done = UNNotificationAction(identifier: "done", title: L("已完成"), options: [])
+        let later = UNNotificationAction(identifier: "snooze", title: L("10 分钟后提醒"), options: [])
+        center.setNotificationCategories([UNNotificationCategory(identifier: "agenda", actions: [done, later], intentIdentifiers: [], options: [])])
+    }
     func refreshPermission(request: Bool = false) {
-        guard !simulated else { return }
+        guard !simulated else { permissionText = L("隔离验证模式 · 不发送真实通知"); return }
+        configureActions()
         Task {
             if request { _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge]) }
             let settings = await center.notificationSettings()
             authorized = settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
             switch settings.authorizationStatus {
-            case .authorized: permissionText = settings.soundSetting == .enabled ? "系统通知已允许" : "系统通知已允许 · 系统声音关闭"
-            case .provisional: permissionText = "通知以安静方式投递"
-            case .denied: permissionText = "系统通知未允许 · 日程面板仍可提醒"
-            case .notDetermined: permissionText = "待允许系统通知"
-            default: permissionText = "系统通知权限未知"
+            case .authorized: permissionText = settings.soundSetting == .enabled ? L("系统通知已允许") : L("系统通知已允许 · 系统声音关闭")
+            case .provisional: permissionText = L("通知以安静方式投递")
+            case .denied: permissionText = L("系统通知未允许 · 日程面板仍可提醒")
+            case .notDetermined: permissionText = L("待允许系统通知")
+            default: permissionText = L("系统通知权限未知")
             }
             onReady?()
         }
@@ -135,8 +138,8 @@ enum ReminderPlanner {
             if authorized { for plan in plans {
                 if generation != version { break }
                 let content = UNMutableNotificationContent()
-                content.title = plan.isLead ? "快到时间了 · \(plan.title)" : "现在 · \(plan.title)"
-                content.body = plan.isSnooze ? "稍后提醒到了。原安排 \(AgendaClock.timeText(plan.due))，处理后在朝夕标记完成。" : "\(AgendaClock.timeText(plan.due)) 开始。\(plan.isLead ? "还有一会儿，可以准备了。" : "不着急，一件一件来。")"
+                content.title = plan.isLead ? L("快到时间了 · \(plan.title)") : L("现在 · \(plan.title)")
+                content.body = plan.isSnooze ? L("稍后提醒到了。原安排 \(AgendaClock.timeText(plan.due))，处理后在朝夕标记完成。") : L("\(AgendaClock.timeText(plan.due)) 开始。\(plan.isLead ? L("还有一会儿，可以准备了。") : L("不着急，一件一件来。"))")
                 content.categoryIdentifier = "agenda"
                 content.userInfo = ["occurrenceID": plan.occurrenceID, "plannedDue": plan.due.timeIntervalSince1970]
                 if settings.sound { content.sound = UNNotificationSound(named: UNNotificationSoundName("soft.wav")) }
@@ -151,7 +154,7 @@ enum ReminderPlanner {
                    old.content.userInfo["occurrenceID"] as? String == plan.occurrenceID,
                    old.content.userInfo["plannedDue"] as? Double == plan.due.timeIntervalSince1970 { continue }
                 do { try await center.add(request) }
-                catch { permissionText = "提醒排程失败：\(error.localizedDescription)" }
+                catch { permissionText = L("提醒排程失败：\(error.localizedDescription)") }
             } }
             if generation != version { continue }
             // The macOS scheduler can acknowledge an add before its pending
@@ -193,26 +196,26 @@ enum ReminderPlanner {
                 _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
                 let settings = await center.notificationSettings()
                 authorized = settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
-                permissionText = authorized ? "系统通知已允许" : "系统通知未允许 · 日程面板仍可提醒"
+                permissionText = authorized ? L("系统通知已允许") : L("系统通知未允许 · 日程面板仍可提醒")
                 onReady?()
                 guard authorized else { return }
             }
-            let content = UNMutableNotificationContent(); content.title = "朝夕 · 提醒已就位"; content.body = "这是一次测试提醒。到了时间，就这样轻轻提醒你。"
+            let content = UNMutableNotificationContent(); content.title = L("朝夕 · 提醒已就位"); content.body = L("这是一次测试提醒。到了时间，就这样轻轻提醒你。")
             if sound { content.sound = UNNotificationSound(named: UNNotificationSoundName("soft.wav")) }
             do {
                 try await center.add(UNNotificationRequest(identifier: "chaoxi-test", content: content, trigger: UNTimeIntervalNotificationTrigger(timeInterval: 3, repeats: false)))
-                testStatus = "测试已安排，3 秒后轻轻提醒。"
+                testStatus = L("测试已安排，3 秒后轻轻提醒。")
                 try? await Task.sleep(for: .seconds(4))
                 let delivered = await center.deliveredNotifications()
                 let record = delivered.first { $0.request.identifier == "chaoxi-test" && $0.date >= started }
                 let pending = await center.pendingNotificationRequests()
-                testStatus = record != nil ? "系统已记录投递；没看到横幅时，可检查勿扰与通知设置。" : pending.contains { $0.identifier == "chaoxi-test" } ? "系统仍在等待投递，可检查勿扰与通知设置。" : "系统没有返回投递记录，请检查通知设置。"
+                testStatus = record != nil ? L("系统已记录投递；没看到横幅时，可检查勿扰与通知设置。") : pending.contains { $0.identifier == "chaoxi-test" } ? L("系统仍在等待投递，可检查勿扰与通知设置。") : L("系统没有返回投递记录，请检查通知设置。")
                 if let evidenceURL {
                     let evidence: [String: Any] = ["startedAt": started.timeIntervalSince1970, "deliveredAt": record?.date.timeIntervalSince1970 ?? 0, "delivered": record != nil, "soundInRequest": record?.request.content.sound != nil, "authorized": authorized, "bundle": Bundle.main.bundleURL.path]
                     if let data = try? JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: evidenceURL, options: .atomic) }
                 }
             }
-            catch { permissionText = "测试提醒失败：\(error.localizedDescription)" }
+            catch { permissionText = L("测试提醒失败：\(error.localizedDescription)") }
         }
     }
     func openSettings() {
