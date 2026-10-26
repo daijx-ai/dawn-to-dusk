@@ -1,4 +1,10 @@
 // Dawn to Dusk — English interface. User content is not translated.
+"时长" = "Duration";
+"持续 %@" = "Duration: %@";
+"时长待修正" = "Check duration";
+"不设" = "None";
+"请输入 0–1440 分钟，0 表示不设时长" = "Enter 0–1440 minutes. Use 0 for no duration.";
+"请检查事项名称、时间和时长。尚未保存任何修改。" = "Check the event name, time, and duration. No changes have been saved.";
 " · 更换" = " · Change";
 " 的时间" = " time";
 " 的星期" = " weekday";

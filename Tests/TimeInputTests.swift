@@ -161,6 +161,26 @@ private struct ReactiveTimeInput: View {
         expect(typingEditor.string.isEmpty && TimeInputValue(reactive.text).minutes == 30, "Deleting all text remains empty while editing and means 00")
         typingWindow.makeFirstResponder(nil)
         expect(reactiveHour.stringValue == "00", "Leaving a cleared reactive field displays 00")
+        expect(DurationInputValue.minutes("") == 0 && DurationInputValue.minutes("37") == 37, "Duration accepts cleared and arbitrary exact minutes")
+        expect(DurationInputValue.minutes("1440") == 1440 && DurationInputValue.minutes("1441") == nil && DurationInputValue.minutes("-1") == nil, "Duration boundaries are explicit")
+        var durationText = "5"
+        let durationHost = NSHostingView(rootView: DurationInput(text: Binding(get: { durationText }, set: { durationText = $0 })))
+        let durationWindow = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 280, height: 110), styleMask: .borderless, backing: .buffered, defer: false)
+        durationWindow.contentView = durationHost; durationHost.layoutSubtreeIfNeeded()
+        let durationField = controls(in: durationHost).compactMap { $0 as? NSTextField }.first { $0.isEditable }!
+        expect(!controls(in: durationHost).contains { $0 is NSStepper }, "Duration no longer has tiny stacked arrows")
+        durationField.stringValue = "37"
+        durationField.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: durationField))
+        durationField.delegate?.controlTextDidEndEditing?(Notification(name: NSControl.textDidEndEditingNotification, object: durationField))
+        expect(durationText == "37", "Actual duration field preserves exact minute entry")
+        durationField.stringValue = ""
+        durationField.delegate?.controlTextDidEndEditing?(Notification(name: NSControl.textDidEndEditingNotification, object: durationField))
+        expect(durationText == "0", "Cleared duration normalizes to zero")
+        let disabledHost = NSHostingView(rootView: DurationInput(text: Binding(get: { durationText }, set: { durationText = $0 })).disabled(true))
+        let disabledWindow = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 280, height: 110), styleMask: .borderless, backing: .buffered, defer: false)
+        disabledWindow.contentView = disabledHost; disabledHost.layoutSubtreeIfNeeded()
+        let disabledFields = controls(in: disabledHost).compactMap { $0 as? NSTextField }.filter { $0.accessibilityLabel() == "时长，分钟" }
+        expect(disabledFields.count == 1 && disabledFields.allSatisfy { !$0.isEnabled && !$0.isEditable && !$0.isSelectable }, "No-time events disable the actual native duration field")
         print("Time input: \(checked) checks passed")
     }
 }

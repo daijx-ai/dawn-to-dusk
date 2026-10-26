@@ -387,3 +387,11 @@ struct TimeInputValue {
         return replacing(part, with: String(format: "%02d", next))
     }
 }
+
+enum DurationInputValue {
+    static func minutes(_ text: String) -> Int? {
+        guard text.allSatisfy({ $0 >= "0" && $0 <= "9" }),
+              let value = Int(text.isEmpty ? "0" : text), (0...1440).contains(value) else { return nil }
+        return value
+    }
+}

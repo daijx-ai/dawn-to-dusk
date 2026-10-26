@@ -39,16 +39,24 @@ import Foundation
         check(reloaded.items.first { $0.id == wake.id }?.timeMinutes == 390 && reloaded.items.first { $0.id == sleep.id }?.timeMinutes == 1410, "Saved plan survives reload")
         store.undo()
         check(store.items.first { $0.id == sleep.id } == sleep && store.items.first { $0.id == wake.id } == wake, "One undo restores complete batch including snooze and completion")
-        drafts[1].item.durationMinutes = 60
+        drafts[1].durationInput = "60"
         let withDuration = drafts.compactMap(\.prepared)
         rows = AgendaClock.occurrences(items: withDuration, on: date(25))
         readingGap = ScheduleInterval.following(rows.first { $0.item.id == read.id }!, items: withDuration, on: date(25))!
         check(readingGap.remainingMinutes == 0 && readingGap.text.contains("结束后"), "Explicit one-hour reading uses end time for remaining interval")
-        drafts[1].item.durationMinutes = 90
+        drafts[1].durationInput = "90"
         let overlapping = drafts.compactMap(\.prepared)
         let overlapRows = AgendaClock.occurrences(items: overlapping, on: date(25))
         readingGap = ScheduleInterval.following(overlapRows.first { $0.item.id == read.id }!, items: overlapping, on: date(25))!
         check(readingGap.remainingMinutes == -30 && readingGap.text.contains("重叠 30 分钟"), "Overlapping duration is not presented as free time")
+        for invalidDuration in ["-5", "1441", "1.5", "abc"] {
+            var draft = drafts[1]; draft.durationInput = invalidDuration
+            check(draft.prepared == nil, "Invalid duration cannot save a previous value silently")
+        }
+        var noDuration = drafts[1]; noDuration.durationInput = ""
+        check(noDuration.prepared?.durationMinutes == 0, "Cleared duration means no duration")
+        noDuration.durationInput = "37"
+        check(noDuration.prepared?.durationMinutes == 37, "Duration supports exact minutes, not just multiples of five")
         for invalid in ["25:00", "22:60", "", "hello"] {
             var draft = drafts[0]; draft.timeInput = invalid
             check(draft.prepared == nil, "Reject invalid draft clock")

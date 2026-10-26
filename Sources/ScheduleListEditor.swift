@@ -197,7 +197,7 @@ struct ScheduleListEditor: View {
             }
             Picker(L("重复方式"), selection: $drafts[index].item.repeatRule) {
                 ForEach(RepeatRule.allCases, id: \.self) { Text($0 == .none ? L("单次") : $0.label).tag($0) }
-            }.pickerStyle(.segmented).id(Localization.language).labelsHidden().accessibilityLabel(drafts[index].item.title + L(" 的重复方式"))
+            }.pickerStyle(.segmented).controlSize(.small).id(Localization.language).labelsHidden().accessibilityLabel(drafts[index].item.title + L(" 的重复方式"))
                 .onChange(of: drafts[index].item.repeatRule) { if drafts[index].item.repeatRule != .weekly { drafts[index].weeklyInputs = nil } }
             if drafts[index].hasTime && drafts[index].item.repeatRule != .none {
                 WeeklyTimeEditor(inputs: $drafts[index].weeklyInputs, rule: $drafts[index].item.repeatRule, anchor: drafts[index].item.date, defaultTime: drafts[index].timeInput, title: drafts[index].item.title, onCommit: { finishTimeEdit(drafts[index].id) })
@@ -209,7 +209,7 @@ struct ScheduleListEditor: View {
                         drafts[index].selectWeekday(weekday)
                     })) {
                         ForEach([2, 3, 4, 5, 6, 7, 1], id: \.self) { weekday in Text(["", L("日"), L("一"), L("二"), L("三"), L("四"), L("五"), L("六")][weekday]).tag(weekday) }
-                    }.pickerStyle(.segmented).id(Localization.language).labelsHidden().accessibilityLabel(drafts[index].item.title + L(" 的星期"))
+                    }.pickerStyle(.segmented).controlSize(.small).id(Localization.language).labelsHidden().accessibilityLabel(drafts[index].item.title + L(" 的星期"))
                 }
             }
             DisclosureGroup(L("日期、时长与提醒")) {
@@ -217,14 +217,24 @@ struct ScheduleListEditor: View {
                     DatePicker(drafts[index].item.repeatRule == .none ? L("日期") : L("从这天开始"), selection: Binding(get: { drafts[index].item.date }, set: { drafts[index].setStartDay($0) }), displayedComponents: .date)
                         .environment(\.timeZone, AgendaClock.calendar.timeZone)
                     Toggle(L("设置时间"), isOn: $drafts[index].hasTime)
-                    Stepper(value: $drafts[index].item.durationMinutes, in: 0...1440, step: 5) {
-                        Text(drafts[index].item.durationMinutes == 0 ? L("不设时长") : L("时长 ") + ScheduleInterval.duration(drafts[index].item.durationMinutes))
-                    }.disabled(!drafts[index].hasTime)
+                    DurationInput(text: $drafts[index].durationInput).disabled(!drafts[index].hasTime)
                     Toggle(L("到点提醒"), isOn: $drafts[index].item.reminderEnabled).disabled(!drafts[index].hasTime || drafts[index].item.isTentative)
                     if drafts[index].item.isTentative { Text(L("时间待确认，当前不提醒。可返回日程打开事项确认。")).foregroundStyle(palette.secondary) }
                 }.padding(.top, 8)
             }.font(.system(size: 11)).foregroundStyle(palette.secondary)
+            durationFooter(drafts[index])
         }.padding(12).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 12))
+    }
+    private func durationFooter(_ draft: ScheduleDraft) -> some View {
+        let duration = draft.hasTime ? DurationInputValue.minutes(draft.durationInput) : 0
+        let label: String
+        if let duration { label = duration > 0 ? L("持续 \(ScheduleInterval.duration(duration))") : L("不设时长") }
+        else { label = L("时长待修正") }
+        return HStack {
+            Spacer(minLength: 0)
+            Text(label).font(.system(size: 11, weight: .medium)).monospacedDigit()
+                .foregroundStyle(duration == nil ? palette.warning : palette.secondary)
+        }
     }
     private func addDraft() {
         var draft = ScheduleDraft(AgendaItem(title: "", date: AgendaClock.startOfDay(store.selectedDay), timeMinutes: 21 * 60, repeatRule: .daily))
@@ -240,7 +250,7 @@ struct ScheduleListEditor: View {
     }
     private var changedDrafts: [ScheduleDraft] { drafts.filter { $0.prepared != $0.original || !initialIDs.contains($0.id) } }
     private func validateAndSave() {
-        guard drafts.allSatisfy({ $0.prepared != nil }), applicableOccurrenceDrafts.values.allSatisfy({ $0.target != nil }) else { error = L("请填写事项名称和有效时间，例如 22:30。尚未保存任何修改。"); return }
+        guard drafts.allSatisfy({ $0.prepared != nil }), applicableOccurrenceDrafts.values.allSatisfy({ $0.target != nil }) else { error = L("请检查事项名称、时间和时长。尚未保存任何修改。"); return }
         // Surface destructive override reset only when such an override actually exists.
         let resetsOverrides = changedDrafts.contains { draft in
             let value = draft.prepared!

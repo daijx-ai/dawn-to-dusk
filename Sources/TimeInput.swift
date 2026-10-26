@@ -15,7 +15,11 @@ struct TimeInput: View {
             number(.minute)
             Text(L("分")).font(.system(size: 9)).foregroundStyle(palette.secondary)
             Button { wheelOpen.toggle() } label: {
-                Image(systemName: "chevron.up.chevron.down").font(.system(size: 11, weight: .semibold)).frame(width: 22, height: 28).contentShape(Rectangle())
+                Image(systemName: "clock").font(.system(size: 12, weight: .medium))
+                    .frame(width: 25, height: 25)
+                    .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(palette.border, lineWidth: 1) }
+                    .contentShape(Rectangle())
             }.buttonStyle(.plain).foregroundStyle(palette.accent).accessibilityLabel(label + L("，滚轮选择"))
                 .popover(isPresented: $wheelOpen, arrowEdge: .bottom) {
                     VStack(spacing: 12) {
@@ -48,8 +52,8 @@ struct TimeInput: View {
         let invalid = !value.isEmpty && TimeInputValue.number(value, for: part) == nil
         let name = label + (part == .hour ? L("，小时") : L("，分钟"))
         return HStack(spacing: 1) {
-            TimeNumberField(value: Binding(get: { TimeInputValue(text).text(for: part) }, set: { text = TimeInputValue(text).replacing(part, with: $0) }),
-                            part: part, label: name, ink: palette.ink, accent: palette.accent,
+            NumberInputField(value: Binding(get: { TimeInputValue(text).text(for: part) }, set: { text = TimeInputValue(text).replacing(part, with: $0) }),
+                            range: TimeInputValue.range(for: part), minimumDigits: 2, label: name, ink: palette.ink, accent: palette.accent,
                             adjust: { adjust(part, by: -$0) }, commit: onCommit)
                 .frame(width: 28, height: 25)
                 .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 5))
@@ -63,6 +67,7 @@ struct TimeInput: View {
 
 private final class SelectAllTimeField: NSTextField {
     override func mouseDown(with event: NSEvent) {
+        guard isEnabled && isEditable else { return }
         let wasEditing = currentEditor() != nil
         super.mouseDown(with: event)
         // AppKit places the caret after begin-editing; select after that first
@@ -71,14 +76,16 @@ private final class SelectAllTimeField: NSTextField {
     }
 }
 
-private struct TimeNumberField: NSViewRepresentable {
+private struct NumberInputField: NSViewRepresentable {
     @Binding var value: String
-    let part: TimeInputValue.Part
+    let range: ClosedRange<Int>
+    let minimumDigits: Int
     let label: String
     let ink: Color
     let accent: Color
     let adjust: (Int) -> Void
     let commit: () -> Void
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> SelectAllTimeField {
@@ -93,6 +100,9 @@ private struct TimeNumberField: NSViewRepresentable {
     }
     func updateNSView(_ field: SelectAllTimeField, context: Context) {
         context.coordinator.parent = self
+        if field.isEnabled != isEnabled { field.isEnabled = isEnabled }
+        if field.isEditable != isEnabled { field.isEditable = isEnabled }
+        if field.isSelectable != isEnabled { field.isSelectable = isEnabled }
         // Echoing a keystroke back through stringValue resets AppKit's caret.
         // Only external changes (for example a wheel selection) replace an
         // active editor. A normal SwiftUI rerender must leave typing alone.
@@ -111,11 +121,11 @@ private struct TimeNumberField: NSViewRepresentable {
         if let editor = field.currentEditor() as? NSTextView { editor.insertionPointColor = NSColor(accent) }
     }
     final class Coordinator: NSObject, NSTextFieldDelegate {
-        var parent: TimeNumberField
+        var parent: NumberInputField
         var lastEmittedValue: String
-        init(_ parent: TimeNumberField) { self.parent = parent; lastEmittedValue = parent.value }
+        init(_ parent: NumberInputField) { self.parent = parent; lastEmittedValue = parent.value }
         func controlTextDidChange(_ notification: Notification) {
-            guard let field = notification.object as? NSTextField else { return }
+            guard let field = notification.object as? NSTextField, field.isEnabled else { return }
             let value = TimeInputValue.normalizedNumberInput(field.stringValue)
             if value != field.stringValue {
                 field.stringValue = value
@@ -129,8 +139,8 @@ private struct TimeNumberField: NSViewRepresentable {
         }
         func controlTextDidEndEditing(_ notification: Notification) {
             guard let field = notification.object as? NSTextField,
-                  let number = TimeInputValue.number(field.stringValue, for: parent.part) else { return }
-            let value = String(format: "%02d", number)
+                  let number = Int(field.stringValue.isEmpty ? "0" : field.stringValue), parent.range.contains(number) else { return }
+            let value = String(format: "%0*d", parent.minimumDigits, number)
             field.stringValue = value
             lastEmittedValue = value
             parent.value = value
@@ -149,6 +159,43 @@ private struct TimeNumberField: NSViewRepresentable {
             case "moveDown:": parent.adjust(-1); return true
             default: return false
             }
+        }
+    }
+}
+
+struct DurationInput: View {
+    @Binding var text: String
+    var label = L("时长")
+    @Environment(\.agendaPalette) private var palette
+
+    private var minutes: Int? { DurationInputValue.minutes(text) }
+    private func presetTitle(_ value: Int) -> String { value == 60 ? L("\(1) 小时") : L("\(value) 分钟") }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Text(label)
+                Spacer(minLength: 8)
+                NumberInputField(value: $text, range: 0...1440, minimumDigits: 1, label: label + L("，分钟"), ink: palette.ink, accent: palette.accent,
+                                 adjust: { step in if let minutes { text = String(min(1440, max(0, minutes - step * 5))) } }, commit: {})
+                    .frame(width: 62, height: 28)
+                    .background(palette.background, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(minutes == nil ? palette.warning : palette.border, lineWidth: 1) }
+                Text(L("分钟")).foregroundStyle(palette.secondary)
+            }
+            HStack(spacing: 5) {
+                ForEach([0, 15, 30, 60], id: \.self) { preset in
+                    Button { text = String(preset) } label: {
+                        Text(preset == 0 ? L("不设") : presetTitle(preset))
+                            .font(.system(size: 11, weight: minutes == preset ? .semibold : .regular))
+                            .lineLimit(1).minimumScaleFactor(0.85)
+                            .frame(maxWidth: .infinity, minHeight: 27)
+                            .background(minutes == preset ? palette.accent.opacity(0.15) : palette.background.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
+                            .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(minutes == preset ? palette.accent.opacity(0.65) : palette.border.opacity(0.65), lineWidth: 1) }
+                    }.buttonStyle(.plain).foregroundStyle(minutes == preset ? palette.accent : palette.secondary)
+                        .accessibilityLabel(preset == 0 ? L("不设时长") : L("时长 ") + presetTitle(preset))
+                }
+            }
+            if minutes == nil { Text(L("请输入 0–1440 分钟，0 表示不设时长")).font(.system(size: 11)).foregroundStyle(palette.warning) }
         }
     }
 }

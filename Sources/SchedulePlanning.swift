@@ -4,6 +4,7 @@ struct ScheduleDraft: Identifiable {
     let original: AgendaItem
     var item: AgendaItem
     var timeInput: String
+    var durationInput: String
     var hasTime: Bool
     var weeklyInputs: [String: String]?
     private var weeklyStartDay: Date
@@ -15,6 +16,7 @@ struct ScheduleDraft: Identifiable {
         weeklyStartDay = AgendaClock.startOfDay(item.date)
         hasTime = item.timeMinutes != nil
         timeInput = item.timeMinutes.map { String(format: "%02d:%02d", $0 / 60, $0 % 60) } ?? "09:00"
+        durationInput = String(item.durationMinutes)
         weeklyInputs = item.weeklyTimes?.mapValues { String(format: "%02d:%02d", $0 / 60, $0 % 60) }
     }
     mutating func selectWeekday(_ weekday: Int) {
@@ -29,6 +31,8 @@ struct ScheduleDraft: Identifiable {
     var prepared: AgendaItem? {
         var value = item
         if hasTime {
+            guard let duration = DurationInputValue.minutes(durationInput) else { return nil }
+            value.durationMinutes = duration
             if item.repeatRule == .weekly, let weeklyInputs {
                 let times = weeklyInputs.compactMapValues { TimeInputValue($0).minutes }
                 guard !times.isEmpty, times.count == weeklyInputs.count else { return nil }

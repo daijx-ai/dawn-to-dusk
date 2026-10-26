@@ -806,7 +806,7 @@ struct ItemEditor: View {
     @State private var hasTime = true
     @State private var tentative = false
     @State private var reminder = true
-    @State private var duration = 0
+    @State private var durationInput = "0"
     @State private var category = "生活"
     @State private var repeatRule = RepeatRule.none
     @State private var note = ""
@@ -855,7 +855,7 @@ struct ItemEditor: View {
                 DisclosureGroup(L("更多选项"), isExpanded: $showingDetails) {
                     VStack(alignment: .leading, spacing: 12) {
                         Picker("分类", selection: $category) { ForEach(Array(Set(["生活", "工作", "学习", "健康", category])).sorted(), id: \.self) { Text(categoryLabel($0)).tag($0) } }
-                        if hasTime { Stepper(value: $duration, in: 0...1440, step: 5) { Text(duration == 0 ? L("不设时长") : L("时长 \(duration) 分钟")) } }
+                        if hasTime { DurationInput(text: $durationInput) }
                         TextField(L("备注（可选）"), text: $note, axis: .vertical).lineLimit(2...3).textFieldStyle(.roundedBorder)
                         Toggle(L("时间尚未确认，暂不提醒"), isOn: $tentative)
                     }.padding(.top, 10)
@@ -881,7 +881,7 @@ struct ItemEditor: View {
     private func load() {
         originalItem = item
         weeklyInputs = item?.weeklyTimes?.mapValues { String(format: "%02d:%02d", $0 / 60, $0 % 60) }
-        day = schedulingChecklist ? store.selectedDay : (item?.scheduledDay ?? store.selectedDay); title = item?.title ?? ""; tentative = item?.isTentative ?? false; reminder = item?.reminderEnabled ?? true; duration = item?.durationMinutes ?? 0; category = item?.category ?? "生活"; repeatRule = item?.repeatRule ?? .none; note = item?.note ?? ""
+        day = schedulingChecklist ? store.selectedDay : (item?.scheduledDay ?? store.selectedDay); title = item?.title ?? ""; tentative = item?.isTentative ?? false; reminder = item?.reminderEnabled ?? true; durationInput = String(item?.durationMinutes ?? 0); category = item?.category ?? "生活"; repeatRule = item?.repeatRule ?? .none; note = item?.note ?? ""
         if schedulingChecklist {
             hasTime = false; timeInput = "00:00"; tentative = false; reminder = true
         } else {
@@ -903,7 +903,8 @@ struct ItemEditor: View {
             return
         }
         var edited = originalItem ?? AgendaItem(title: title, date: day)
-        edited.title = title.trimmingCharacters(in: .whitespacesAndNewlines); edited.date = AgendaClock.startOfDay(day); edited.timeMinutes = hasTime ? parseClockInput(timeInput) : nil; edited.durationMinutes = duration; edited.category = category; edited.repeatRule = repeatRule; edited.isTentative = tentative; edited.reminderEnabled = reminder && !tentative && hasTime; edited.note = note
+        guard !hasTime || DurationInputValue.minutes(durationInput) != nil else { validation = L("请输入 0–1440 分钟，0 表示不设时长"); return }
+        edited.title = title.trimmingCharacters(in: .whitespacesAndNewlines); edited.date = AgendaClock.startOfDay(day); edited.timeMinutes = hasTime ? parseClockInput(timeInput) : nil; edited.durationMinutes = hasTime ? DurationInputValue.minutes(durationInput)! : 0; edited.category = category; edited.repeatRule = repeatRule; edited.isTentative = tentative; edited.reminderEnabled = reminder && !tentative && hasTime; edited.note = note
         if hasTime, repeatRule == .weekly, let weeklyInputs {
             let times = weeklyInputs.compactMapValues { TimeInputValue($0).minutes }
             guard !times.isEmpty, times.count == weeklyInputs.count else { validation = L("请至少选择一天，并填写有效时间。"); return }
