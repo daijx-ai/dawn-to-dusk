@@ -41,6 +41,8 @@ Run the checks:
 
 Data is stored in `~/Library/Application Support/Chaoxi/agenda.json`. Core schedule features use local data. Feishu sync additionally requires an installed and signed-in `lark-cli`, currently located at `~/bin/lark-cli`. Sync reads the primary calendar and refreshes periodically when enabled.
 
+The repository contains source code, documentation, and synthetic test data only. It does not contain personal schedules, to-dos, completion records, backups, or account credentials. Keep local data, exported backups, and screenshots outside the repository.
+
 The Hermes capture helper at `Integrations/Hermes/chaoxi-capture/scripts/capture.py` accepts JSON on standard input and invokes the local command-line interface in `~/Applications/朝夕.app`. The Clawd desktop pet bridge is a local customization and is not included in this public repository.
 
 ## Version

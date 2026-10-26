@@ -8,3 +8,16 @@
 .env*
 *.pem
 *.key
+
+# Private schedules, exported backups, screenshots, and local runtime evidence.
+agenda*.json
+朝夕日程-*.json
+Dawn-to-Dusk-*.json
+runtime.json
+notification*.json
+*.log
+/data/
+/backups/
+/exports/
+/screenshots/
+codex-clipboard-*.png

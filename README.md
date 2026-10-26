@@ -42,6 +42,8 @@ open build/朝夕.app
 
 应用数据保存在 `~/Library/Application Support/Chaoxi/agenda.json`。日程核心功能使用本机数据；飞书同步需要另行安装并登录 `lark-cli`，当前查找路径为 `~/bin/lark-cli`。飞书数据只读主日历，并按应用设置定期刷新。
 
+仓库只包含源码、说明和合成测试数据，不包含个人日程、清单、完成记录、备份或账号凭据。本机数据、导出备份和截图应保留在仓库之外。
+
 Hermes 捕获辅助脚本位于 `Integrations/Hermes/chaoxi-capture/scripts/capture.py`，通过标准输入接收 JSON，并调用 `~/Applications/朝夕.app` 的本机命令行入口。Clawd 桌面宠物桥接仍是本地定制内容，不包含在这个公开仓库中。
 
 ## 版本
