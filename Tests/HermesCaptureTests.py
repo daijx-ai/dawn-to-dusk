@@ -497,5 +497,26 @@ class HermesCaptureTests(unittest.TestCase):
         self.assertEqual(self.read({"from": "2026-11-09", "to": "2026-11-15"}, runner=self.query_runner(broken))["status"], "malformed_response")
 
 
+    def test_match_filters_rows_locally_and_is_not_sent_to_app(self):
+        result = self.read({"date": "2026-10-13", "match": " 充电 线 "})
+        self.assertEqual(json.loads(self.calls[0][1]["input"]), {"date": "2026-10-13"})
+        self.assertEqual((result["schedule"], [r["title"] for r in result["checklist"]]), ([], ["买充电线"]))
+        self.assertEqual((result["match"], result["filtered"]), (" 充电 线 ", True))
+        response = self.range_response()
+        response["days"][1]["schedule"][0]["title"] = "接口验收（临时）"
+        ranged = self.read({"from": "2026-11-09", "to": "2026-11-15", "match": "接口验收(临时)"}, runner=self.query_runner(response))
+        self.assertEqual(len(ranged["days"]), 7)
+        self.assertEqual([len(day["schedule"]) for day in ranged["days"]], [0, 1, 0, 0, 0, 0, 0])
+
+    def test_match_rejects_bad_values_and_still_fails_closed(self):
+        for bad in ("", "   ", 3, "x" * 101):
+            self.assertEqual(self.read({"match": bad})["status"], "invalid")
+        self.assertEqual(self.calls, [])
+        broken = self.query_response()
+        broken["schedule"][0]["title"] = ""
+        self.assertEqual(self.read({"match": "充电"}, runner=self.query_runner(broken))["status"], "malformed_response")
+        self.assertNotIn("filtered", self.read())
+
+
 if __name__ == "__main__":
     unittest.main()

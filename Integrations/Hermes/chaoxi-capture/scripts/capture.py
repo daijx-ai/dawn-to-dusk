@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -296,8 +297,11 @@ def query(payload, *, environment=None, runner=None):
                 "error": _redact(error, environment)}
 
     try:
-        if not isinstance(payload, dict) or set(payload) - {"date", "from", "to"}:
-            raise ValueError("查询 stdin 只能包含可选 date，或 from 与 to")
+        if not isinstance(payload, dict) or set(payload) - {"date", "from", "to", "match"}:
+            raise ValueError("查询 stdin 只能包含可选 date，或 from 与 to，以及可选 match")
+        match = payload.get("match")
+        if match is not None and (not isinstance(match, str) or not _fold(match) or len(match) > 100):
+            raise ValueError("match 需为 1–100 字的标题关键词")
         if ("from" in payload) != ("to" in payload) or ("date" in payload and "from" in payload):
             raise ValueError("区间查询需同时提供 from 和 to，且不能与 date 混用")
         if "from" in payload:
@@ -363,19 +367,38 @@ def query(payload, *, environment=None, runner=None):
             for entry in days:
                 if not isinstance(entry.get("schedule"), list):
                     raise ValueError()
-                day_rows.append({"date": entry["date"], "schedule": [_schedule_row(row, entry["date"]) for row in entry["schedule"]],
-                                 "skipped": _skipped_rows(entry.get("skipped"), entry["date"])})
-            return _redact(dict(base, **{"from": outgoing["from"], "to": outgoing["to"], "days": day_rows, "checklist": checklist_rows}), environment)
+                day_rows.append({"date": entry["date"], "schedule": _matching([_schedule_row(row, entry["date"]) for row in entry["schedule"]], match),
+                                 "skipped": _matching(_skipped_rows(entry.get("skipped"), entry["date"]), match)})
+            return _redact(dict(base, **{"from": outgoing["from"], "to": outgoing["to"], "days": day_rows,
+                                         "checklist": _matching(checklist_rows, match)}, **_match_meta(match)), environment)
         day = _day(response.get("date"))
         if outgoing.get("date", day) != day:
             raise ValueError()
         schedule = response.get("schedule")
         if not isinstance(schedule, list):
             raise ValueError()
-        return _redact(dict(base, date=day, schedule=[_schedule_row(row, day) for row in schedule],
-                            skipped=_skipped_rows(response.get("skipped"), day), checklist=checklist_rows), environment)
+        return _redact(dict(base, date=day, schedule=_matching([_schedule_row(row, day) for row in schedule], match),
+                            skipped=_matching(_skipped_rows(response.get("skipped"), day), match),
+                            checklist=_matching(checklist_rows, match), **_match_meta(match)), environment)
     except (ValueError, TypeError, KeyError, AttributeError):
         return failed("malformed_response", "朝夕查询结果缺少有效日期、时刻或事项字段；不能当作空清单")
+
+
+def _fold(text):
+    """Loose title key: NFKC (full-width brackets → ASCII), case-folded, whitespace removed."""
+    return "".join(unicodedata.normalize("NFKC", text).casefold().split()) if isinstance(text, str) else ""
+
+
+def _matching(rows, match):
+    # Filtering happens after validation, so a bad app response still fails closed.
+    if match is None:
+        return rows
+    key = _fold(match)
+    return [row for row in rows if key in _fold(row.get("title"))]
+
+
+def _match_meta(match):
+    return {} if match is None else {"match": match, "filtered": True}
 
 
 def main():
