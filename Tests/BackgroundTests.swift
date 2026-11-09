@@ -55,7 +55,7 @@ import Foundation
         let blur = legacy.effectView as! NSVisualEffectView
         precondition(blur.material == .popover && blur.blendingMode == .behindWindow && blur.state == .active, "legacy samples desktop when inactive")
         for surface in [native, legacy] {
-            for size in [NSSize(width: 320, height: 520), NSSize(width: 400, height: 850), NSSize(width: 320, height: 82)] {
+            for size in [NSSize(width: 280, height: 360), NSSize(width: 400, height: 850), NSSize(width: 220, height: 64)] {
                 surface.setFrameSize(size)
                 precondition(surface.effectView.frame == surface.bounds, "material fills resized panel")
                 if let blur = surface.desktopBlurView { precondition(blur.frame == surface.bounds, "desktop blur fills resized panel") }

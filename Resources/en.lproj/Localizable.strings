@@ -1,5 +1,7 @@
 // Dawn to Dusk — English interface. User content is not translated.
 "时长" = "Duration";
+"编辑提示" = "Editing tips";
+"提醒 " = "Reminder ";
 "持续 %@" = "Duration: %@";
 "时长待修正" = "Check duration";
 "不设" = "None";

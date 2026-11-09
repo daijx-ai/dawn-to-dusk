@@ -14,11 +14,14 @@ private func parseClockInput(_ text: String) -> Int? {
 
 final class DragGripView: NSView {
     var gripColor = NSColor.secondaryLabelColor
+    var showsHandle = true
     private var initialOrigin: NSPoint?
     private var initialScreenPoint: NSPoint?
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
     override func draw(_ dirtyRect: NSRect) {
+        guard showsHandle else { return }
         gripColor.setFill()
         NSBezierPath(roundedRect: NSRect(x: (bounds.width - 28) / 2, y: (bounds.height - 3) / 2, width: 28, height: 3), xRadius: 1.5, yRadius: 1.5).fill()
     }
@@ -37,8 +40,10 @@ final class DragGripView: NSView {
 
 struct DragGrip: NSViewRepresentable {
     @Environment(\.agendaPalette) private var palette
+    var showsHandle = true
+    var helpText: String? = nil
     func makeNSView(context: Context) -> DragGripView { let view = DragGripView(); view.setAccessibilityElement(true); view.setAccessibilityRole(.group); view.setAccessibilityLabel(L("拖动日程面板")); view.toolTip = L("按住小横线，拖到喜欢的位置"); return view }
-    func updateNSView(_ nsView: DragGripView, context: Context) { nsView.gripColor = NSColor(palette.secondary); nsView.needsDisplay = true }
+    func updateNSView(_ nsView: DragGripView, context: Context) { nsView.gripColor = NSColor(palette.secondary); nsView.showsHandle = showsHandle; nsView.toolTip = helpText ?? L("按住小横线，拖到喜欢的位置"); nsView.needsDisplay = true }
 }
 
 final class ResizeGripView: NSView {
@@ -94,12 +99,16 @@ private struct PanelActionButton: View {
     let symbol: String
     let label: String
     var active = false
+    var iconOnly = false
     let action: () -> Void
     @State private var hovered = false
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 3) { Image(systemName: symbol).font(.system(size: 10)); Text(label).font(.system(size: 10, weight: .medium)).lineLimit(1).minimumScaleFactor(0.9) }
-                .frame(width: 50, height: 36).contentShape(Rectangle())
+            HStack(spacing: 3) {
+                Image(systemName: symbol).font(.system(size: iconOnly ? 13 : 10))
+                if !iconOnly { Text(label).font(.system(size: 10, weight: .medium)).lineLimit(1).minimumScaleFactor(0.9) }
+            }
+                .frame(width: iconOnly ? 30 : 50, height: iconOnly ? 30 : 36).contentShape(Rectangle())
                 .background(active ? palette.accent.opacity(0.16) : hovered ? palette.controlFill : palette.controlFill.opacity(0.65), in: RoundedRectangle(cornerRadius: 9))
         }.buttonStyle(.plain).foregroundStyle(palette.accent).onHover { hovered = $0 }.accessibilityLabel(label).help(label)
     }
@@ -129,6 +138,10 @@ struct AgendaView: View {
     @State private var queuedCaptures: [EditorSession] = []
     @State private var capturePresentation = AgendaCapturePresentation()
     @State private var panelHeight: CGFloat = 850
+    @State private var panelWidth: CGFloat = 400
+    private var tight: Bool { panelHeight < 480 }
+    private var narrow: Bool { panelWidth < 320 }
+    private var sidePadding: CGFloat { narrow ? 12 : 16 }
     @State private var showingDateControls = false
     @State private var showingHighlightedChoices = false
     @State private var showingCompactChoices = false
@@ -162,13 +175,13 @@ struct AgendaView: View {
                         Picker(L("内容"), selection: $section) {
                             Text(L("日程")).tag(AgendaSection.agenda)
                             Text(L("清单 \(store.checklistItems().count)")).tag(AgendaSection.checklist)
-                        }.pickerStyle(.segmented).id(Localization.language).labelsHidden().font(.system(size: 11)).padding(.horizontal, 16).padding(.bottom, 6).accessibilityLabel(L("日程与独立清单"))
+                        }.pickerStyle(.segmented).controlSize(.small).id(Localization.language).labelsHidden().font(.system(size: 11)).padding(.horizontal, sidePadding).padding(.bottom, 6).accessibilityLabel(L("日程与独立清单"))
                     }
                     if editingSchedule {
-                        ScheduleListEditor(store: store, showsIntervals: $editorShowsIntervals) { editingSchedule = false }
+                        ScheduleListEditor(store: store, showsIntervals: $editorShowsIntervals, narrow: narrow) { editingSchedule = false }
                     } else {
-                        if showsHero { hero(now: now).padding(.horizontal, 16).padding(.bottom, 6) }
-                        if let dueAlert, !showsHero || dueAlert.id != highlighted?.occurrence?.id { dueStrip(dueAlert).padding(.horizontal, 16).padding(.bottom, 4) }
+                        if showsHero { hero(now: now).padding(.horizontal, sidePadding).padding(.bottom, 6) }
+                        if let dueAlert, !showsHero || dueAlert.id != highlighted?.occurrence?.id { dueStrip(dueAlert).padding(.horizontal, sidePadding).padding(.bottom, 4) }
                         if section == .checklist { checklistContent(); checklistFooter() }
                         else {
                             ScrollViewReader { proxy in
@@ -194,7 +207,7 @@ struct AgendaView: View {
                                                 }
                                             }.font(.system(size: 13, weight: .medium)).tint(palette.warning).foregroundStyle(palette.warning)
                                         }
-                                    }.padding(.horizontal, 16).padding(.bottom, 16)
+                                    }.padding(.horizontal, sidePadding).padding(.bottom, 12)
                                 }
                                 .onAppear { DispatchQueue.main.async { scrollToTime(proxy, now: now) } }
                                 .onChange(of: store.selectedDay) { DispatchQueue.main.async { scrollToTime(proxy, now: Date()) } }
@@ -218,13 +231,16 @@ struct AgendaView: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
             .overlay { RoundedRectangle(cornerRadius: 24).strokeBorder(palette.border.opacity(controller.glassEnabled && !reduceTransparency ? 0.35 : 1), lineWidth: 1) }
-            .overlay(alignment: .top) { DragGrip().frame(width: 56, height: 18).padding(.top, 4) }
+            .overlay(alignment: .top) {
+                if store.settings.compact { DragGrip().frame(height: 16).padding(.horizontal, 14) }
+                else { DragGrip().frame(width: 56, height: 18).padding(.top, 4) }
+            }
             .overlay(alignment: .bottomTrailing) { if !store.settings.compact { ResizeGrip().frame(width: 26, height: 26).padding(3) } }
         }
         .font(.system(size: 14))
         .environment(\.locale, store.settings.language.locale)
         .environment(\.agendaPalette, palette).tint(palette.accent)
-        .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { panelHeight = $0 }
+        .onGeometryChange(for: CGSize.self, of: { $0.size }) { panelHeight = $0.height; panelWidth = $0.width }
         .sheet(item: $modal, onDismiss: presentQueuedCapture) { content in
             VStack(spacing: 0) {
                 if controller.isQA {
@@ -250,10 +266,10 @@ struct AgendaView: View {
             HStack(spacing: 6) {
                 Text(L("朝夕")).font(.system(size: Localization.language == .english ? 14 : 18, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.65)
                 Spacer(minLength: 4)
-                PanelActionButton(symbol: store.settings.floating ? "pin.fill" : "pin", label: L("置顶"), active: store.settings.floating) { store.settings.floating.toggle(); _ = store.save() }
-                PanelActionButton(symbol: "rectangle.compress.vertical", label: L("小窗")) { store.settings.compact = true; _ = store.save() }
-                PanelActionButton(symbol: "minus", label: L("最小化")) { controller.minimizeToMenu() }
-                PanelActionButton(symbol: "slider.horizontal.3", label: L("设置")) { modal = .settings }
+                PanelActionButton(symbol: store.settings.floating ? "pin.fill" : "pin", label: L("置顶"), active: store.settings.floating, iconOnly: panelWidth < 360) { store.settings.floating.toggle(); _ = store.save() }
+                PanelActionButton(symbol: "rectangle.compress.vertical", label: L("小窗"), iconOnly: panelWidth < 360) { store.settings.compact = true; _ = store.save() }
+                PanelActionButton(symbol: "minus", label: L("最小化"), iconOnly: panelWidth < 360) { controller.minimizeToMenu() }
+                PanelActionButton(symbol: "slider.horizontal.3", label: L("设置"), iconOnly: panelWidth < 360) { modal = .settings }
             }
             HStack(alignment: .center, spacing: 6) {
                 if section == .checklist {
@@ -274,8 +290,8 @@ struct AgendaView: View {
                         .popover(isPresented: $showingDateControls, arrowEdge: .bottom) { dateControls(now: now) }
                 }
                 VStack(alignment: .trailing, spacing: 0) {
-                    Text(now, formatter: Self.clockFormatter).font(.system(size: 34, weight: .medium, design: .rounded)).monospacedDigit().foregroundStyle(palette.accent).lineLimit(1).minimumScaleFactor(0.75).accessibilityLabel(L("北京时间 \(Self.clockFormatter.string(from: now))"))
-                    Text(L("北京时间")).font(.system(size: 11)).foregroundStyle(palette.secondary)
+                    Text(now, formatter: tight || narrow ? Self.minuteFormatter : Self.clockFormatter).font(.system(size: tight ? 24 : 34, weight: .medium, design: .rounded)).monospacedDigit().foregroundStyle(palette.accent).lineLimit(1).minimumScaleFactor(0.85).accessibilityLabel(L("北京时间 \(Self.clockFormatter.string(from: now))"))
+                    if !tight { Text(L("北京时间")).font(.system(size: 11)).foregroundStyle(palette.secondary) }
                 }.layoutPriority(1).contentShape(Rectangle())
                     .onTapGesture(count: 2) { returnToNow() }
                     .help(L("双击时钟，回到今天的现在刻度"))
@@ -283,7 +299,7 @@ struct AgendaView: View {
                     .accessibilityHint(L("双击回到今天的现在刻度"))
                     .accessibilityAction(named: Text(L("回到今天的现在刻度"))) { returnToNow() }
             }
-        }.padding(.horizontal, 18).padding(.top, panelHeight < 650 ? 14 : 16).padding(.bottom, 7)
+        }.padding(.horizontal, narrow ? 12 : 18).padding(.top, 18).padding(.bottom, tight ? 4 : 7)
     }
 
     private func dateControls(now: Date) -> some View {
@@ -330,10 +346,12 @@ struct AgendaView: View {
         switch offset { case 0: return L("今天"); case 1: return L("明天"); case -1: return L("昨天"); default: return L("所选日期") }
     }
 
-    private func hero(now: Date) -> some View {
+    @ViewBuilder private func hero(now: Date) -> some View {
         let highlighted = store.highlightedFocus(now: now)
         let small = panelHeight < 650
-        return VStack(alignment: .leading, spacing: small ? 4 : 6) {
+        if tight { condensedHero(highlighted, now: now) }
+        else {
+        VStack(alignment: .leading, spacing: small ? 4 : 6) {
             HStack(spacing: 5) {
                 highlightedMenu(highlighted)
                 Spacer(minLength: 3)
@@ -349,6 +367,30 @@ struct AgendaView: View {
             if highlighted?.isChecklist != true { Text(highlighted.map { highlightedStatus($0, now: now) } ?? L("此刻，留一点空白")).font(.system(size: small ? 12 : 14, weight: .medium, design: .rounded)).monospacedDigit().foregroundStyle(palette.heroSecondary).lineLimit(1).minimumScaleFactor(0.8) }
         }.foregroundStyle(palette.heroInk).padding(small ? 9 : 12).frame(maxWidth: .infinity, alignment: .leading)
             .background(LinearGradient(colors: [palette.heroBackground.opacity(controller.glassEnabled && !reduceTransparency ? 0.4 : 1), palette.heroEnd.opacity(controller.glassEnabled && !reduceTransparency ? 0.4 : 1)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: small ? 12 : 17))
+        }
+    }
+
+    private func condensedHero(_ focus: AgendaFocus?, now: Date) -> some View {
+        HStack(spacing: 6) {
+            Button { showingHighlightedChoices = true } label: {
+                Image(systemName: focus.map { store.isPinned($0) } == true ? "pin.fill" : "calendar").frame(width: 24, height: 28)
+            }.buttonStyle(.plain).accessibilityLabel(L("更换顶部事项"))
+                .popover(isPresented: $showingHighlightedChoices, arrowEdge: .bottom) { highlightedChoices(forCompact: false) }
+            VStack(alignment: .leading, spacing: 3) {
+                if let focus {
+                    Button { editFocus(focus) } label: {
+                        Text(focus.title).font(.system(size: 14, weight: .semibold)).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                    }.buttonStyle(.plain).accessibilityLabel(L("修改 \(focus.title)"))
+                } else { Text(L("按自己的节奏来")).font(.system(size: 14, weight: .semibold)) }
+                Text(focus.map { highlightedSchedule($0, now: now) + " · " + highlightedStatus($0, now: now) } ?? L("此刻，留一点空白"))
+                    .font(.system(size: 11)).foregroundStyle(palette.heroSecondary).monospacedDigit().lineLimit(1)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if let focus {
+                Button { store.toggle(focus) } label: { Image(systemName: "checkmark.circle").font(.system(size: 18)).frame(width: 26, height: 28) }
+                    .buttonStyle(.plain).accessibilityLabel(L("完成 \(focus.title)"))
+            }
+        }.foregroundStyle(palette.heroInk).padding(8)
+            .background(palette.heroBackground.opacity(controller.glassEnabled && !reduceTransparency ? 0.4 : 1), in: RoundedRectangle(cornerRadius: 11))
     }
 
     private func highlightedMenu(_ highlighted: AgendaFocus?) -> some View {
@@ -679,7 +721,7 @@ struct AgendaView: View {
                     Button(L("撤销上一步")) { store.undo() }
                 } label: { Image(systemName: "ellipsis").frame(width: 24, height: 34).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 9)) }.menuStyle(.borderlessButton).fixedSize().help(L("清单更多操作")).padding(.trailing, 12)
             }
-        }.padding(.horizontal, 18).padding(.top, 7).padding(.bottom, 10).background(palette.controlFill.opacity(0.5))
+        }.padding(.horizontal, narrow ? 12 : 18).padding(.top, 7).padding(.bottom, 10).background(palette.controlFill.opacity(0.5))
     }
 
     private func addQuickChecklist() {
@@ -696,15 +738,18 @@ struct AgendaView: View {
           }
           HStack(spacing: 9) {
             Button { editingSchedule = true } label: {
-                Label(L("编辑日程"), systemImage: "pencil").font(.system(size: 12, weight: .medium)).padding(.horizontal, 12).padding(.vertical, panelHeight < 650 ? 7 : 11).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 12))
-            }.buttonStyle(.plain).help(L("直接修改所有日程的时间、每天或每周重复方式"))
+                Group {
+                    if narrow { Image(systemName: "pencil").frame(width: 32, height: 30) }
+                    else { Label(L("编辑日程"), systemImage: "pencil").font(.system(size: 12, weight: .medium)).padding(.horizontal, 12).padding(.vertical, panelHeight < 650 ? 7 : 11) }
+                }.background(palette.controlFill, in: RoundedRectangle(cornerRadius: 9))
+            }.buttonStyle(.plain).accessibilityLabel(L("编辑日程")).help(L("直接修改所有日程的时间、每天或每周重复方式"))
             Button { add() } label: { Label(L("添加日程"), systemImage: "plus").font(.system(size: 12, weight: .semibold)).frame(maxWidth: .infinity).padding(.vertical, panelHeight < 650 ? 7 : 11).foregroundStyle(palette.primaryInk).background(palette.primaryFill, in: RoundedRectangle(cornerRadius: 12)) }.buttonStyle(.plain)
             Menu {
                 Button(L("撤销上一步")) { store.undo() }
                 Button(store.settings.showCompleted ? L("隐藏已完成") : L("显示已完成")) { store.settings.showCompleted.toggle(); _ = store.save() }
             } label: { Image(systemName: "ellipsis").font(.system(size: 15)).frame(width: 36, height: 36).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 12)) }.menuStyle(.borderlessButton).fixedSize().help(L("更多")).padding(.trailing, 12)
           }
-        }.padding(.horizontal, 18).padding(.top, panelHeight < 650 ? 6 : 9).padding(.bottom, panelHeight < 650 ? 10 : 14)
+        }.padding(.horizontal, narrow ? 12 : 18).padding(.top, panelHeight < 650 ? 6 : 9).padding(.bottom, panelHeight < 650 ? 10 : 14)
             .background(palette.controlFill.opacity(0.5))
     }
 
@@ -712,38 +757,58 @@ struct AgendaView: View {
         let displayed = store.compactFocus(now: now)
         let followsPinned = store.compactUsesPinnedFocus
         let overdue = AgendaClock.overdue(items: store.items, now: now).filter { ($0.end ?? .distantPast) <= now }.count + AgendaClock.earlierUnscheduled(items: store.items, now: now).count
-        let detail = displayed.map { focus -> String in
-            if focus.isChecklist { return L("固定的清单事项") }
+        let detail: (visible: String, full: String) = displayed.map { focus -> (visible: String, full: String) in
+            if focus.isChecklist { let text = L("固定的清单事项"); return (text, text) }
             let status: String
             if let due = focus.due, due <= now, let end = focus.occurrence?.end, end > now {
                 status = L("还剩 ") + AgendaClock.countdown(to: end, now: now)
             } else { status = highlightedStatus(focus, now: now) }
-            return highlightedSchedule(focus, now: now) + " · " + status
-        } ?? L("点展开查看日程")
-        return HStack(spacing: 10) {
+            let full = highlightedSchedule(focus, now: now) + " · " + status
+            let shortStatus: String
+            if let due = focus.due {
+                if !focus.item.isTentative, focus.item.reminderEnabled, let occurrence = focus.occurrence, let snooze = occurrence.item.snoozes[occurrence.completionKey], snooze > now {
+                    shortStatus = L("提醒 ") + AgendaClock.timeText(snooze)
+                } else if due <= now, let end = focus.occurrence?.end, end > now {
+                    shortStatus = L("还剩 ") + AgendaClock.countdown(to: end, now: now)
+                } else {
+                    shortStatus = (due > now ? L("还有 ") : "") + AgendaClock.countdown(to: due, now: now)
+                }
+            } else { shortStatus = L("未定时") }
+            return (panelWidth < 280 ? shortStatus : full, full)
+        } ?? (L("点展开查看日程"), L("点展开查看日程"))
+        return HStack(spacing: panelWidth < 280 ? 6 : 10) {
             Button { showingCompactChoices = true } label: {
                 HStack(spacing: 2) {
-                    Image(systemName: followsPinned ? "pin.fill" : "calendar").font(.system(size: 18))
+                    Image(systemName: followsPinned ? "pin.fill" : "calendar").font(.system(size: 16))
                     Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
-                }.frame(width: 32, height: 32).contentShape(Rectangle()).foregroundStyle(palette.accent)
+                }.frame(width: 26, height: 30).contentShape(Rectangle()).foregroundStyle(palette.accent)
             }.buttonStyle(.plain).fixedSize()
                 .help(L("小窗显示：\(followsPinned ? L("固定事项") : L("最近安排"))，点击切换"))
                 .accessibilityLabel(L("切换小窗显示：\(followsPinned ? L("固定事项") : L("最近安排"))"))
                 .popover(isPresented: $showingCompactChoices, arrowEdge: .bottom) { highlightedChoices(forCompact: true) }
             VStack(alignment: .leading, spacing: 3) {
                 Text((controller.isQA ? L("[测试] ") : "") + (displayed?.title ?? L("暂无接下来的安排"))).font(.system(size: 15, weight: .semibold)).foregroundStyle(palette.ink).lineLimit(1).help(displayed?.title ?? "")
-                Text(detail).font(.system(size: 11)).foregroundStyle(palette.secondary).monospacedDigit().lineLimit(1).minimumScaleFactor(0.85).help(detail)
-            }.frame(maxWidth: .infinity, alignment: .leading)
-            if overdue > 0 {
+                Text(detail.visible).font(.system(size: 11)).foregroundStyle(palette.secondary).monospacedDigit().lineLimit(1).minimumScaleFactor(0.85).help(detail.full).accessibilityLabel(detail.full)
+            }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .overlay { DragGrip(showsHandle: false, helpText: (displayed?.title ?? L("暂无接下来的安排")) + "\n" + detail.full).accessibilityHidden(true) }
+            if overdue > 0 && panelWidth >= 280 {
                 Button { store.settings.compact = false; _ = store.save() } label: {
                     Label("\(overdue)", systemImage: "bell.badge.fill").font(.system(size: 11)).foregroundStyle(palette.warning).padding(.vertical, 6)
                 }.buttonStyle(.plain).help(L("\(overdue) 件安排待处理，展开查看")).accessibilityLabel(L("\(overdue) 件安排待处理，展开查看"))
             }
             HStack(spacing: 3) {
-                IconButton(symbol: "minus", label: L("隐藏日程")) { controller.minimizeToMenu() }
-                Button { store.settings.compact = false; _ = store.save() } label: { Text(L("展开")).font(.system(size: 11, weight: .medium)).frame(width: 44, height: 30).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 9)) }.buttonStyle(.plain).help(L("展开日程"))
+                Menu {
+                    if overdue > 0 { Button(L("\(overdue) 件安排待处理，展开查看")) { store.settings.compact = false; _ = store.save() } }
+                    Button(L("添加待办")) { controller.beginChecklistCapture() }
+                    Button(L("设置")) { controller.expandForInput(); modal = .settings }
+                    Button(L("隐藏日程")) { controller.minimizeToMenu() }
+                } label: { Image(systemName: "ellipsis").frame(width: 24, height: 30).foregroundStyle(overdue > 0 ? palette.warning : palette.secondary) }
+                    .menuStyle(.borderlessButton).fixedSize().accessibilityLabel(L("更多"))
+                Button { store.settings.compact = false; _ = store.save() } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 11, weight: .medium)).frame(width: 28, height: 30).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 8))
+                }.buttonStyle(.plain).help(L("展开日程")).accessibilityLabel(L("展开日程"))
             }
-        }.padding(.horizontal, 14).padding(.vertical, 12)
+        }.padding(.horizontal, panelWidth < 280 ? 10 : 14).padding(.vertical, 8).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func add() {
@@ -783,6 +848,7 @@ struct AgendaView: View {
     }
     private func badge(_ text: String, color: Color) -> some View { Text(text).font(.system(size: 10, weight: .medium)).foregroundStyle(color).padding(.horizontal, 5).padding(.vertical, 2).background(color.opacity(0.1), in: Capsule()) }
     static let clockFormatter: DateFormatter = { let f = DateFormatter(); f.timeZone = AgendaClock.calendar.timeZone; f.dateFormat = "HH:mm:ss"; return f }()
+    static let minuteFormatter: DateFormatter = { let f = DateFormatter(); f.timeZone = AgendaClock.calendar.timeZone; f.dateFormat = "HH:mm"; return f }()
     static var selectedDayFormatter: DateFormatter { Localization.dateFormatter(chinese: "M 月 d 日 · EEE", english: "MMM d · EEE") }
     static var shortDayFormatter: DateFormatter { Localization.dateFormatter(chinese: "M/d", english: "M/d") }
     static var dayFormatter: DateFormatter { Localization.dateFormatter(chinese: "M 月 d 日 · EEEE", english: "MMM d · EEEE") }

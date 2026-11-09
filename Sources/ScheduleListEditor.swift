@@ -5,6 +5,7 @@ struct ScheduleListEditor: View {
     @Environment(\.agendaPalette) private var palette
     @ObservedObject var store: AgendaStore
     @Binding var showsIntervals: Bool
+    var narrow = false
     let close: () -> Void
     @State private var drafts: [ScheduleDraft] = []
     @State private var orderingTimes: [UUID: Int] = [:]
@@ -58,8 +59,9 @@ struct ScheduleListEditor: View {
                     Spacer()
                     Toggle(L("显示间隔"), isOn: $showsIntervals).toggleStyle(.switch).controlSize(.mini).font(.system(size: 11))
                 }
-                Text(L("输入时位置固定；回车或点“完成”后排序。")).font(.system(size: 11)).foregroundStyle(palette.secondary)
-                Text(L("在这里修改每周规律；临时变动请选日期，点“仅改这一次”。")).font(.system(size: 11)).foregroundStyle(palette.secondary).fixedSize(horizontal: false, vertical: true)
+                if narrow {
+                    DisclosureGroup(L("编辑提示")) { editingHints.padding(.top, 5) }.font(.system(size: 11))
+                } else { editingHints }
                 Button { addDraft() } label: { Label(L("添加日程"), systemImage: "plus") }.buttonStyle(.borderless).font(.system(size: 12))
             }.padding(.horizontal, 16).padding(.vertical, 10)
             ScrollViewReader { proxy in
@@ -142,6 +144,12 @@ struct ScheduleListEditor: View {
             Text(L("重复事项会应用到所有日期，历史完成记录保留。修改重复事项的日期、时间或周期，会清除该事项已有的单次时间调整。"))
         }
     }
+    private var editingHints: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(L("输入时位置固定；回车或点“完成”后排序。"))
+            Text(L("在这里修改每周规律；临时变动请选日期，点“仅改这一次”。")).fixedSize(horizontal: false, vertical: true)
+        }.font(.system(size: 11)).foregroundStyle(palette.secondary)
+    }
     private func refreshOrdering() {
         orderingTimes = Dictionary(uniqueKeysWithValues: drafts.map { draft in
             let time = rows.first { $0.item.id == draft.id }?.due
@@ -195,12 +203,10 @@ struct ScheduleListEditor: View {
                     Button(L("完成")) { finishTimeEdit(drafts[index].id) }.controlSize(.small).disabled(drafts[index].prepared == nil)
                 }
             }
-            Picker(L("重复方式"), selection: $drafts[index].item.repeatRule) {
-                ForEach(RepeatRule.allCases, id: \.self) { Text($0 == .none ? L("单次") : $0.label).tag($0) }
-            }.pickerStyle(.segmented).controlSize(.small).id(Localization.language).labelsHidden().accessibilityLabel(drafts[index].item.title + L(" 的重复方式"))
+            recurrencePicker(index)
                 .onChange(of: drafts[index].item.repeatRule) { if drafts[index].item.repeatRule != .weekly { drafts[index].weeklyInputs = nil } }
             if drafts[index].hasTime && drafts[index].item.repeatRule != .none {
-                WeeklyTimeEditor(inputs: $drafts[index].weeklyInputs, rule: $drafts[index].item.repeatRule, anchor: drafts[index].item.date, defaultTime: drafts[index].timeInput, title: drafts[index].item.title, onCommit: { finishTimeEdit(drafts[index].id) })
+                WeeklyTimeEditor(inputs: $drafts[index].weeklyInputs, rule: $drafts[index].item.repeatRule, anchor: drafts[index].item.date, defaultTime: drafts[index].timeInput, title: drafts[index].item.title, narrow: narrow, onCommit: { finishTimeEdit(drafts[index].id) })
             }
             if drafts[index].item.repeatRule == .weekly && drafts[index].weeklyInputs == nil {
                 HStack(spacing: 6) {
@@ -209,7 +215,7 @@ struct ScheduleListEditor: View {
                         drafts[index].selectWeekday(weekday)
                     })) {
                         ForEach([2, 3, 4, 5, 6, 7, 1], id: \.self) { weekday in Text(["", L("日"), L("一"), L("二"), L("三"), L("四"), L("五"), L("六")][weekday]).tag(weekday) }
-                    }.pickerStyle(.segmented).controlSize(.small).id(Localization.language).labelsHidden().accessibilityLabel(drafts[index].item.title + L(" 的星期"))
+                    }.pickerStyle(.menu).controlSize(.small).id(Localization.language).labelsHidden().accessibilityLabel(drafts[index].item.title + L(" 的星期"))
                 }
             }
             DisclosureGroup(L("日期、时长与提醒")) {
@@ -224,6 +230,13 @@ struct ScheduleListEditor: View {
             }.font(.system(size: 11)).foregroundStyle(palette.secondary)
             durationFooter(drafts[index])
         }.padding(12).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 12))
+    }
+    @ViewBuilder private func recurrencePicker(_ index: Int) -> some View {
+        let picker = Picker(L("重复方式"), selection: $drafts[index].item.repeatRule) {
+            ForEach(RepeatRule.allCases, id: \.self) { Text($0 == .none ? L("单次") : $0.label).tag($0) }
+        }.controlSize(.small).id(Localization.language).accessibilityLabel(drafts[index].item.title + L(" 的重复方式"))
+        if narrow { picker.pickerStyle(.menu) }
+        else { picker.pickerStyle(.segmented).labelsHidden() }
     }
     private func durationFooter(_ draft: ScheduleDraft) -> some View {
         let duration = draft.hasTime ? DurationInputValue.minutes(draft.durationInput) : 0
@@ -283,6 +296,7 @@ struct WeeklyTimeEditor: View {
     let anchor: Date
     let defaultTime: String
     let title: String
+    var narrow = false
     var onCommit: () -> Void = {}
     @Environment(\.agendaPalette) private var palette
 
@@ -298,10 +312,10 @@ struct WeeklyTimeEditor: View {
             if inputs != nil {
                 ForEach([2, 3, 4, 5, 6, 7, 1], id: \.self) { day in
                     HStack {
-                        Toggle(Self.weekday(day), isOn: Binding(get: { inputs?[String(day)] != nil }, set: { enabled in
+                        Toggle(narrow && Localization.language == .english ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][day - 1] : Self.weekday(day), isOn: Binding(get: { inputs?[String(day)] != nil }, set: { enabled in
                             if enabled { inputs?[String(day)] = defaultTime }
                             else { inputs?.removeValue(forKey: String(day)) }
-                        })).toggleStyle(.checkbox).font(.system(size: 12))
+                        })).toggleStyle(.checkbox).font(.system(size: 12)).accessibilityLabel(Self.weekday(day))
                         Spacer()
                         if inputs?[String(day)] != nil {
                             TimeInput(text: Binding(get: { inputs?[String(day)] ?? defaultTime }, set: { inputs?[String(day)] = $0 }), label: title + " " + Self.weekday(day), onCommit: onCommit)

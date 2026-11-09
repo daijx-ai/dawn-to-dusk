@@ -203,7 +203,7 @@ struct AgendaCaptureReceiver {
         panelCompact = store.settings.compact
         if UserDefaults.standard.object(forKey: glassKey) != nil { glassStrength = AgendaBackgroundOpacity.clamp(UserDefaults.standard.double(forKey: glassKey), fallback: glassStrength) }
         if UserDefaults.standard.object(forKey: glassEnabledKey) != nil { glassEnabled = UserDefaults.standard.bool(forKey: glassEnabledKey) }
-        let size = NSSize(width: 400, height: panelCompact ? 82 : 850)
+        let size = AgendaPanelGeometry.defaultSize(compact: panelCompact)
         panel = AgendaPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel, .resizable], backing: .buffered, defer: false)
         panel.title = qa ? L("朝夕 · 隔离验收") : L("朝夕 · 日程"); panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true
         panel.isMovableByWindowBackground = true; panel.hidesOnDeactivate = false; panel.becomesKeyOnlyIfNeeded = false
@@ -249,16 +249,17 @@ struct AgendaCaptureReceiver {
             UserDefaults.standard.set(NSStringFromRect(panel.frame), forKey: modeFrameKey(panelCompact))
             changingPanelMode = true
             panelCompact = compact
-            panel.minSize = NSSize(width: 320, height: compact ? 82 : 520)
-            panel.maxSize = NSSize(width: 10000, height: compact ? 82 : 10000)
+            panel.minSize = AgendaPanelGeometry.minimumSize(compact: compact)
+            panel.maxSize = NSSize(width: 10000, height: compact ? AgendaPanelGeometry.minimumSize(compact: true).height : 10000)
             let old = panel.frame
             let saved = UserDefaults.standard.string(forKey: modeFrameKey(compact)).map(NSRectFromString)
-            let target = saved ?? NSRect(x: old.minX, y: old.maxY - (compact ? 82 : 850), width: old.width, height: compact ? 82 : 850)
+            let defaultHeight = AgendaPanelGeometry.defaultSize(compact: compact).height
+            let target = saved ?? NSRect(x: old.minX, y: old.maxY - defaultHeight, width: old.width, height: defaultHeight)
             panel.setFrame(AgendaPanelGeometry.normalized(target, compact: compact), display: true)
             changingPanelMode = false
         } else {
-            panel.minSize = NSSize(width: 320, height: compact ? 82 : 520)
-            panel.maxSize = NSSize(width: 10000, height: compact ? 82 : 10000)
+            panel.minSize = AgendaPanelGeometry.minimumSize(compact: compact)
+            panel.maxSize = NSSize(width: 10000, height: compact ? AgendaPanelGeometry.minimumSize(compact: true).height : 10000)
         }
         ensureVisible(); savePanelFrame()
     }

@@ -300,10 +300,13 @@ struct AgendaTimeline {
 }
 
 enum AgendaPanelGeometry {
+    static func minimumSize(compact: Bool) -> CGSize { compact ? CGSize(width: 220, height: 64) : CGSize(width: 280, height: 360) }
+    static func defaultSize(compact: Bool) -> CGSize { compact ? CGSize(width: 280, height: 64) : CGSize(width: 360, height: 600) }
     static func normalized(_ frame: CGRect, compact: Bool) -> CGRect {
-        let fallback = CGRect(x: 0, y: 0, width: 400, height: compact ? 82 : 850)
+        let minimum = minimumSize(compact: compact)
+        let fallback = CGRect(origin: .zero, size: defaultSize(compact: compact))
         guard [frame.minX, frame.minY, frame.width, frame.height].allSatisfy({ $0.isFinite }), frame.width > 0, frame.height > 0 else { return fallback }
-        let size = CGSize(width: max(320, frame.width), height: compact ? 82 : max(520, frame.height))
+        let size = CGSize(width: max(minimum.width, frame.width), height: compact ? minimum.height : max(minimum.height, frame.height))
         return CGRect(x: frame.minX, y: frame.maxY - size.height, width: size.width, height: size.height)
     }
 }
