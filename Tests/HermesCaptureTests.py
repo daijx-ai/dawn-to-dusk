@@ -53,6 +53,10 @@ class HermesCaptureTests(unittest.TestCase):
             self.assertNotIn(ENV[key], visible)
             self.assertNotIn(key, self.calls[0][1]["env"])
 
+    def test_capture_item_id_matches_query_and_change_case(self):
+        result = self.send(runner=self.runner(update={"item_id": ITEM_ID.lower()}))
+        self.assertEqual(result["item_id"], ITEM_ID.upper())
+
     def test_entry_index_separates_tasks_but_is_not_sent(self):
         first = self.send({"title": "买线", "entry_index": 0})
         second = self.send({"title": "交材料", "entry_index": 1})

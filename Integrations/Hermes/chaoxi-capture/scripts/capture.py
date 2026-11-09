@@ -144,7 +144,8 @@ def capture(payload, *, environment=None, runner=None, dry_run=False):
     if status not in ("created", "already_processed") or type(response.get("item_exists")) is not bool:
         return failed("malformed_response", "朝夕响应缺少有效状态或事项存在信息")
     try:
-        item_id = str(uuid.UUID(response["item_id"]))
+        # Match the uppercase form that --query and --change return, so ids compare as plain strings.
+        item_id = str(uuid.UUID(response["item_id"])).upper()
     except (KeyError, ValueError, TypeError, AttributeError):
         return failed("malformed_response", "朝夕响应缺少有效 item_id")
     exists = response["item_exists"]
