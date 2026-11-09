@@ -16,6 +16,8 @@ private enum CaptureTransportError: LocalizedError {
 // All request/reply names are generated attempt UUIDs, never external request IDs.
 private final class CaptureDirectory {
     static let maximumBytes = 16 * 1024
+    /// Change replies carry full before/after snapshots; requests stay at 16 KiB.
+    static let maximumReplyBytes = 256 * 1024
     let fd: Int32
     init(root: URL) throws {
         guard root.isFileURL, root.path.hasPrefix("/") else { throw CaptureTransportError.unsafePath }
@@ -48,7 +50,7 @@ private final class CaptureDirectory {
         }
         return names.sorted()
     }
-    func read(_ name: String) throws -> Data? {
+    func read(_ name: String, limit: Int = CaptureDirectory.maximumBytes) throws -> Data? {
         let file = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         if file < 0 {
             if errno == ENOENT { return nil }
@@ -57,7 +59,7 @@ private final class CaptureDirectory {
         defer { Darwin.close(file) }
         var info = stat()
         guard fstat(file, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == getuid(), (info.st_mode & 0o077) == 0 else { throw CaptureTransportError.unsafePath }
-        guard info.st_size >= 0 && info.st_size <= Self.maximumBytes else { throw CaptureTransportError.oversized }
+        guard info.st_size >= 0 && info.st_size <= limit else { throw CaptureTransportError.oversized }
         var data = Data()
         var bytes = [UInt8](repeating: 0, count: 4096)
         while true {
@@ -65,12 +67,12 @@ private final class CaptureDirectory {
             if count == 0 { break }
             if count < 0 { if errno == EINTR { continue }; throw CaptureTransportError.io("无法读取文件") }
             data.append(contentsOf: bytes.prefix(count))
-            guard data.count <= Self.maximumBytes else { throw CaptureTransportError.oversized }
+            guard data.count <= limit else { throw CaptureTransportError.oversized }
         }
         return data
     }
-    func write(_ data: Data, name: String) throws {
-        guard data.count <= Self.maximumBytes else { throw CaptureTransportError.oversized }
+    func write(_ data: Data, name: String, limit: Int = CaptureDirectory.maximumBytes) throws {
+        guard data.count <= limit else { throw CaptureTransportError.oversized }
         var target = stat()
         if fstatat(fd, name, &target, AT_SYMLINK_NOFOLLOW) == 0 {
             guard (target.st_mode & S_IFMT) == S_IFREG, target.st_uid == getuid() else { throw CaptureTransportError.unsafePath }
@@ -104,10 +106,11 @@ final class CaptureInbox {
     init(root: URL) { self.root = root }
     static func notificationObject(for root: URL) -> String { root.standardizedFileURL.resolvingSymlinksInPath().path }
 
-    @MainActor func processPending(handler: (AgendaCaptureRequest) -> AgendaCaptureResult) {
+    @MainActor func processPending(handler: (AgendaCaptureRequest) -> AgendaCaptureResult, changeHandler: ((AgendaChangeRequest) -> AgendaChangeResult)? = nil) {
         do {
             let directory = try CaptureDirectory(root: root)
-            for name in try directory.names() where name.hasSuffix(".request.json") {
+            let names = try directory.names()
+            for name in names where name.hasSuffix(".request.json") {
                 let attempt = String(name.dropLast(".request.json".count))
                 guard UUID(uuidString: attempt) != nil else { continue }
                 let result: AgendaCaptureResult
@@ -127,6 +130,29 @@ final class CaptureInbox {
                     // Keep the request for a later replay if the acknowledgment cannot be saved.
                     continue
                 }
+            }
+            // Change requests use their own suffix so an older consumer never misreads them as captures.
+            guard let changeHandler else { return }
+            for name in names where name.hasSuffix(".change.json") {
+                let attempt = String(name.dropLast(".change.json".count))
+                guard UUID(uuidString: attempt) != nil else { continue }
+                var result: AgendaChangeResult
+                do {
+                    guard let data = try directory.read(name) else { continue }
+                    let request: AgendaChangeRequest
+                    do { request = try AgendaChangeRequest.parse(data) }
+                    catch { result = .invalid(nil, error.localizedDescription); throw error }
+                    let handled = changeHandler(request)
+                    result = handled.requestID == request.requestID ? handled : AgendaChangeResult(ok: false, status: "save_failed", requestID: request.requestID, error: "保存回执的请求编号不匹配。")
+                } catch let error as AgendaChangeError {
+                    result = .invalid(nil, error.message)
+                } catch {
+                    result = .invalid(nil, error.localizedDescription)
+                }
+                do {
+                    try directory.write(JSONEncoder().encode(result), name: attempt + ".reply.json", limit: CaptureDirectory.maximumReplyBytes)
+                    try directory.remove(name)
+                } catch { continue }
             }
         } catch {
             // A failed or unsafe queue cannot imply that any request was saved.
@@ -158,11 +184,11 @@ struct CaptureCLIOptions {
     let noLaunch: Bool
     let qa: Bool
     let root: URL
-    static func parse(_ arguments: [String], productionRoot: URL) throws -> Self {
+    static func parse(_ arguments: [String], productionRoot: URL, command: String = "--capture") throws -> Self {
         var seen = Set<String>(), index = 0, dataPath: String?
         while index < arguments.count {
             let argument = arguments[index]
-            guard ["--capture", "--dry-run", "--no-launch", "--qa", "--data-dir"].contains(argument), seen.insert(argument).inserted else { throw CaptureTransportError.invalidArguments("未知或重复的捕获参数。") }
+            guard [command, "--dry-run", "--no-launch", "--qa", "--data-dir"].contains(argument), seen.insert(argument).inserted else { throw CaptureTransportError.invalidArguments("未知或重复的\(command == "--change" ? "修改" : "捕获")参数。") }
             if argument == "--data-dir" {
                 index += 1
                 guard index < arguments.count, arguments[index].hasPrefix("/") else { throw CaptureTransportError.invalidArguments("--data-dir 必须提供绝对目录。") }
@@ -170,7 +196,7 @@ struct CaptureCLIOptions {
             }
             index += 1
         }
-        guard seen.contains("--capture") else { throw CaptureTransportError.invalidArguments("缺少 --capture。") }
+        guard seen.contains(command) else { throw CaptureTransportError.invalidArguments("缺少 \(command)。") }
         let qa = seen.contains("--qa")
         guard qa == (dataPath != nil) else { throw CaptureTransportError.invalidArguments("隔离捕获须同时指定 --qa 与 --data-dir，正式捕获不能自定义目录。") }
         let root = dataPath.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? productionRoot
@@ -194,11 +220,16 @@ struct CaptureCLIEnvironment {
     var clock: () -> TimeInterval
     var pause: () -> Void
     var timeout: TimeInterval = 30
+    /// Read-only dry-run of a change against the saved agenda in the given root.
+    var previewChange: ((AgendaChangeRequest, URL) throws -> Data)? = nil
 }
 
 enum CaptureCLI {
     static func run(arguments: [String], bundleURL: URL, productionRoot: URL) -> Int32 {
-        run(arguments: arguments, bundleURL: bundleURL, productionRoot: productionRoot, environment: CaptureCLIEnvironment(
+        run(arguments: arguments, bundleURL: bundleURL, productionRoot: productionRoot, environment: defaultEnvironment)
+    }
+    static var defaultEnvironment: CaptureCLIEnvironment {
+        CaptureCLIEnvironment(
             readInput: {
                 var data = Data()
                 while let part = try FileHandle.standardInput.read(upToCount: min(4096, CaptureDirectory.maximumBytes + 1 - data.count)), !part.isEmpty {
@@ -213,7 +244,7 @@ enum CaptureCLI {
             notify: { DistributedNotificationCenter.default().postNotificationName(CaptureInbox.notificationName, object: CaptureInbox.notificationObject(for: $0), userInfo: nil, deliverImmediately: true) },
             clock: { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000 },
             pause: { Thread.sleep(forTimeInterval: 0.05) }
-        ))
+        )
     }
 
     static func run(arguments: [String], bundleURL: URL, productionRoot: URL, environment: CaptureCLIEnvironment) -> Int32 {
@@ -263,6 +294,67 @@ enum CaptureCLI {
             return 2
         } catch {
             emit(AgendaCaptureResult(ok: false, requestID: requestID, status: submitted ? "pending" : "invalid", error: error.localizedDescription))
+            return submitted ? 2 : 1
+        }
+    }
+
+    /// `--change`: same queue, launch and reply rules as `--capture`; the reply is the Store's receipt.
+    static func runChange(arguments: [String], bundleURL: URL, productionRoot: URL, environment: CaptureCLIEnvironment) -> Int32 {
+        var requestID: String?
+        var submitted = false
+        func emit(_ object: [String: Any]) {
+            var value = object
+            value["saved"] = value["saved"] ?? false
+            value["request_id"] = requestID ?? NSNull()
+            if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) { environment.output(data) }
+        }
+        do {
+            let options = try CaptureCLIOptions.parse(arguments, productionRoot: productionRoot, command: "--change")
+            let input = try environment.readInput()
+            guard input.count <= CaptureDirectory.maximumBytes else { throw CaptureTransportError.oversized }
+            let request = try AgendaChangeRequest.parse(input)
+            requestID = request.requestID
+            if options.dryRun {
+                guard let preview = environment.previewChange else { throw CaptureTransportError.invalidArguments("当前入口不支持预览。") }
+                let data = try preview(request, options.root)
+                environment.output(data)
+                let reply = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                return reply?["ok"] as? Bool == true ? 0 : 1
+            }
+            let directory = try CaptureDirectory(root: options.root)
+            let attempt = UUID().uuidString
+            // Forward the validated original bytes; the consumer parses them again with the same rules.
+            try directory.write(input, name: attempt + ".change.json")
+            submitted = true
+            var launchError: String?
+            do {
+                if !options.noLaunch {
+                    let running = try environment.isRunning(options.root)
+                    if !running { try environment.launch(bundleURL, options.qa, options.root) }
+                }
+            } catch { launchError = error.localizedDescription }
+            environment.notify(options.root)
+            let deadline = environment.clock() + min(30, max(0, environment.timeout))
+            repeat {
+                if let data = try directory.read(attempt + ".reply.json", limit: CaptureDirectory.maximumReplyBytes) {
+                    guard let reply = try JSONSerialization.jsonObject(with: data) as? [String: Any], let ok = reply["ok"] as? Bool, let status = reply["status"] as? String else {
+                        throw CaptureTransportError.io("回执格式无效")
+                    }
+                    let replyID = reply["request_id"] as? String
+                    guard replyID == request.requestID || (!ok && replyID == nil) else { throw CaptureTransportError.io("回执编号不匹配") }
+                    let reliable = ok && AgendaChangeResult.successStatuses.contains(status) && reply["saved"] as? Bool == true && reply["item_exists"] is Bool
+                    guard !ok || reliable else { throw CaptureTransportError.io("没有可靠的保存回执") }
+                    environment.output(data)
+                    try? directory.remove(attempt + ".reply.json")
+                    return reliable ? 0 : 1
+                }
+                if environment.clock() >= deadline { break }
+                environment.pause()
+            } while true
+            emit(["ok": false, "status": "pending", "error": launchError ?? "请求已排队，30 秒内未收到回执；请用原 request_id 核对或重试，当前不能确认已修改。"])
+            return 2
+        } catch {
+            emit(["ok": false, "status": submitted ? "pending" : "invalid", "error": error.localizedDescription])
             return submitted ? 2 : 1
         }
     }

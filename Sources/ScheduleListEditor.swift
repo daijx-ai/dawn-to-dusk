@@ -17,6 +17,11 @@ struct ScheduleListEditor: View {
     @FocusState private var focusedTitle: UUID?
     @State private var error: String?
     @State private var showingSaveImpact = false
+    @State private var draftToken = UUID()
+    /// Existing items with unsaved edits; external changes to them return conflict until save or cancel.
+    private var draftItemIDs: Set<UUID> {
+        Set(changedDrafts.map(\.id)).intersection(initialIDs).union(removedDrafts.map(\.id)).union(occurrenceDrafts.values.map { $0.original.item.id })
+    }
 
     private var applicableOccurrenceDrafts: [String: ScheduleOccurrenceDraft] {
         ScheduleEditing.applicable(occurrenceDrafts, to: drafts.compactMap(\.prepared))
@@ -137,6 +142,8 @@ struct ScheduleListEditor: View {
             initialIDs = Set(drafts.map(\.id))
         }
         .onChange(of: store.selectedDay) { refreshOrdering() }
+        .onChange(of: draftItemIDs) { store.registerDraft(draftToken, ids: draftItemIDs) }
+        .onDisappear { store.releaseDraft(draftToken) }
         .confirmationDialog(L("修改重复安排"), isPresented: $showingSaveImpact, titleVisibility: .visible) {
             Button(L("修改每一次并保存")) { save() }
             Button(L("继续编辑"), role: .cancel) { }
@@ -282,6 +289,9 @@ struct ScheduleListEditor: View {
             // Completion and reminder snoozes may legitimately change while editing.
             original.completedDays = current.completedDays
             original.snoozes = current.snoozes
+            // Skips and pauses are live state that the Store preserves on save, like completions.
+            original.skippedDays = current.skippedDays
+            original.pausedRanges = current.pausedRanges
             guard original == current else { error = L("有日程已在编辑期间更新，请取消后重新打开，避免覆盖新内容。"); return }
         }
         let targets = applicableOccurrenceDrafts.compactMapValues(\.target)

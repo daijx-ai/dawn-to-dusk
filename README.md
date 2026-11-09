@@ -18,7 +18,8 @@
 - 「稍后提醒」与「推迟这次安排」分开处理
 - 系统本地通知、菜单栏入口、小窗、置顶和多种外观；小窗可独立切换最近安排与固定事项
 - 本地 JSON 存储、备份导出与恢复
-- 本机捕获和只读查询命令行接口
+- 本机捕获、修改和只读查询命令行接口；外部修改可在窗口里撤销
+- 重复事项可跳过某一天或暂停一段时间，被跳过的日期显示为「已跳过」，一键恢复
 - 可选飞书主日历只读同步；不会向飞书写入
 
 ## 系统要求
@@ -44,13 +45,27 @@ open build/朝夕.app
 
 仓库只包含源码、说明和合成测试数据，不包含个人日程、清单、完成记录、备份或账号凭据。本机数据、导出备份和截图应保留在仓库之外。
 
-Hermes 捕获辅助脚本位于 `Integrations/Hermes/chaoxi-capture/scripts/capture.py`，通过标准输入接收 JSON，并调用 `~/Applications/朝夕.app` 的本机命令行入口。Clawd 桌面宠物桥接仍是本地定制内容，不包含在这个公开仓库中。
+## 本机命令行接口
+
+所有入口都通过标准输入接收 JSON，隔离验收时加 `--qa --data-dir <绝对路径>`。完整字段见 `朝夕.app/Contents/MacOS/Chaoxi --help`。
+
+- `--capture`：新增事项。
+- `--query`：只读查询，不启动窗口。`{}` 查今天，`{"date":"YYYY-MM-DD"}` 查某天，`{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}` 一次查最多 31 天。每条结果带 `revision`、`note`、`source`（`ui/hermes/cli/feishu`）、`capture_request_id` 和 `feishu_readonly`，并列出被跳过的重复事项。
+- `--change`：修改一条已有事项。`op` 支持 `update`（只改传入字段）、`reschedule_once`（只改这一次）、`complete` / `reopen`、`skip_once`、`pause_range` / `resume`、`delete` 和 `restore`。`target` 三选一：`item_id`、`occurrence_id` 或当初捕获用的 `capture_request_id`。
+
+`--change` 与 `--capture` 使用同一个本机收件队列，由朝夕进程统一写入 `agenda.json`；朝夕未运行时会启动它。同一 `request_id` 重复提交返回 `already_processed`；`if_match` 与当前 `revision` 不一致，或窗口里正在编辑同一条且有未保存草稿时返回 `conflict`；飞书同步来的事项返回 `forbidden`。删除会把完整快照写进回执和变更记录，`restore` 可原样恢复 id、完成记录和重复规则。每次外部修改都记录改前、改后、来源和时间：窗口的「撤销上一步」可撤销最近一次外部修改，「设置 → 其他 → 最近外部改动」可逐条撤销。修改时间、跳过和删除后，本地提醒随之重排或取消。`--change --dry-run` 只读已保存的数据，返回预期的 `before` / `after`，不保存、不排队、不改提醒。回执字段为 `ok`、`status`、`item_exists`、`saved`、`before`、`after`、`request_id`；退出码不代表成功，以回执为准。
+
+Hermes 捕获辅助脚本位于 `Integrations/Hermes/chaoxi-capture/scripts/capture.py`，通过标准输入接收 JSON，并调用 `~/Applications/朝夕.app` 的本机命令行入口；`--change` 子命令用于修改、删除、跳过和恢复。Clawd 桌面宠物桥接仍是本地定制内容，不包含在这个公开仓库中。
 
 ## 版本
 
-**1.2.1 (build 15)** · Git 标签 `v1.2.1`。
+**1.3.0 (build 18)**
 
-本版优化时长输入与展示：移除小箭头，支持精确分钟输入和常用时长快捷选择，在卡片右下角持续显示时长；时间滚轮入口改为时钟图标。保留 1.2.0 的中英文界面、按星期分别设置时间和单日临时调整。
+本版开放本机修改接口 `--change`（修改、删除与恢复、单次改期、完成／恢复、跳过与暂停），`--query` 支持最多 31 天的区间查询并返回 `revision` 等修改所需字段。日程页显示「已跳过」的重复事项并可一键恢复；设置里新增「最近外部改动」，可逐条撤销。
+
+### 1.2.1 (build 15) · Git 标签 `v1.2.1`
+
+1.2.1 优化时长输入与展示：移除小箭头，支持精确分钟输入和常用时长快捷选择，在卡片右下角持续显示时长；时间滚轮入口改为时钟图标。保留 1.2.0 的中英文界面、按星期分别设置时间和单日临时调整。
 
 ## 许可
 

@@ -114,7 +114,19 @@ enum ReminderPlanner {
         deferredCount = max(0, ReminderPlanner.plans(items: items, settings: settings, now: Date(), limit: Int.max).count - plans.count)
         guard force || plans != lastPlans || items != desiredItems || settings != desiredSettings else { return false }
         lastPlans = plans; desiredItems = items; desiredSettings = settings; generation += 1
-        guard !simulated else { pendingCount = plans.count; return true }
+        guard !simulated else {
+            pendingCount = plans.count
+            // QA never schedules real notifications; record the computed plan so isolated
+            // acceptance can check that edits, skips and deletions moved or removed reminders.
+            if let evidenceURL {
+                let evidence: [String: Any] = ["simulated": true, "checkedAt": Date().timeIntervalSince1970,
+                                               "pending": plans.map { ["id": $0.id, "fireAt": $0.fireAt.timeIntervalSince1970, "title": $0.title] as [String: Any] }]
+                if let data = try? JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys, .prettyPrinted]) {
+                    try? data.write(to: evidenceURL.deletingLastPathComponent().appendingPathComponent("notification-schedule.json"), options: .atomic)
+                }
+            }
+            return true
+        }
         guard !syncing else { return true }
         syncing = true
         Task {

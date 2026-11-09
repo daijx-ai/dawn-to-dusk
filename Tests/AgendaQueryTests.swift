@@ -60,15 +60,22 @@ import Foundation
         check(!result.schedule.contains { [pending.id, completed.id].contains($0.id) }, "Checklist never becomes a date instance")
         let encoded = try JSONEncoder().encode(result)
         let object = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
-        let expectedTop: Set<String> = ["ok", "status", "read_only", "timezone", "date", "generated_at", "schedule", "checklist"]
+        let expectedTop: Set<String> = ["ok", "status", "read_only", "timezone", "date", "generated_at", "schedule", "skipped", "checklist"]
         check(Set(object.keys) == expectedTop, "Only agreed result fields exposed")
         let scheduleRows = object["schedule"] as! [[String: Any]]
         let untimedRow = scheduleRows.first { ($0["id"] as? String) == untimed.id.uuidString }!
         check(untimedRow["time"] is NSNull && untimedRow["base_time"] is NSNull, "Untimed keys are explicit JSON null")
-        let expectedRow: Set<String> = ["id", "occurrence_id", "title", "date", "time", "base_time", "duration_minutes", "repeat_rule", "completed", "tentative"]
+        let expectedRow: Set<String> = ["id", "occurrence_id", "title", "date", "time", "base_time", "duration_minutes", "repeat_rule", "completed", "tentative",
+                                        "revision", "note", "source", "capture_request_id", "feishu_readonly"]
         check(scheduleRows.allSatisfy { Set($0.keys) == expectedRow }, "Only agreed schedule fields exposed")
-        check((object["checklist"] as! [[String: Any]]).allSatisfy { Set($0.keys) == ["id", "title", "completed"] }, "Minimal checklist fields")
-        check(!String(data: encoded, encoding: .utf8)!.contains("PRIVATE_"), "Notes, categories and source metadata are not exposed")
+        check((object["checklist"] as! [[String: Any]]).allSatisfy { Set($0.keys) == ["id", "title", "completed", "revision", "note", "source", "capture_request_id"] }, "Checklist fields for if_match")
+        let repeatedRow = scheduleRows.first { ($0["id"] as? String) == repeated.id.uuidString }!
+        check(repeatedRow["note"] as? String == "PRIVATE_NOTE" && repeatedRow["source"] as? String == "ui" && repeatedRow["capture_request_id"] is NSNull, "Note and UI source exposed for change callers")
+        check(repeatedRow["revision"] as? String == AgendaRevision.of(repeated) && repeatedRow["feishu_readonly"] as? Bool == false, "Revision matches the item")
+        let meetingRow = scheduleRows.first { ($0["id"] as? String) == meeting.id.uuidString }!
+        check(meetingRow["source"] as? String == "feishu" && meetingRow["feishu_readonly"] as? Bool == true, "Feishu rows are marked read-only")
+        let text = String(data: encoded, encoding: .utf8)!
+        check(!text.contains("PRIVATE_CATEGORY") && !text.contains("PRIVATE_CALENDAR") && !text.contains("PRIVATE_EVENT"), "Categories and Feishu identifiers are not exposed")
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         check(iso.date(from: result.generatedAt) == now, "Timestamp is ISO8601 with timezone")
@@ -94,6 +101,38 @@ import Foundation
         check(postponedResult.schedule[0].occurrenceID.hasSuffix(":2026-10-12"), "Moved occurrence preserves original anchor in identity")
         check(try AgendaQueryReader.query(data: postponedData, on: yesterday, now: now).schedule.isEmpty, "Moved instance leaves original display day")
         check(try AgendaQueryReader.query(data: postponedData, on: tomorrow, now: now).schedule.first?.time == "09:00", "Postponement leaves next day base time unchanged")
+
+        // Range queries, skipped rows, revisions and capture origins.
+        var paused = AgendaItem(title: "上班打卡", date: yesterday, timeMinutes: 540, repeatRule: .daily)
+        paused.pausedRanges = [AgendaDayRange(from: "2026-10-14", to: "2026-10-15")]
+        paused.skippedDays = ["2026-10-17"]
+        let capturedID = UUID()
+        let capturedItem = AgendaItem(title: "外部写入", date: today, timeMinutes: 900)
+        var capturedWithID = capturedItem; capturedWithID.id = capturedID
+        struct ReceiptDocument: Encodable { var version = 1; var items: [AgendaItem]; var settings: AgendaSettings; var captureReceipts: [String: AgendaCaptureReceipt] }
+        let rangeData = try JSONEncoder().encode(ReceiptDocument(items: [paused, capturedWithID, pending], settings: settings,
+            captureReceipts: ["xlys-cap-9": AgendaCaptureReceipt(fingerprint: String(repeating: "a", count: 64), itemID: capturedID, createdAt: now, source: "cli")]))
+        let week = try AgendaQueryRequest.decode(Data("{\"from\":\"2026-10-13\",\"to\":\"2026-10-19\"}".utf8)).days(now: now)
+        check(week.count == 7 && week.first == today, "Seven-day inclusive range")
+        let range = try AgendaQueryReader.query(data: rangeData, days: week, now: now)
+        let rangeObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(range)) as! [String: Any]
+        check(Set(rangeObject.keys) == ["ok", "status", "read_only", "timezone", "from", "to", "generated_at", "days", "checklist"], "Range result fields")
+        check(range.days.map(\.date) == ["2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19"], "Every requested day once")
+        check(range.days[1].schedule.isEmpty && range.days[1].skipped.first?.skippedBy == "pause_range" && range.days[1].skipped.first?.pausedUntil == "2026-10-15", "Paused day listed as skipped")
+        check(range.days[4].skipped.first?.skippedBy == "skip_once" && range.days[3].schedule.count == 1, "Single skip and normal day")
+        let capturedRow = range.days[0].schedule.first { $0.id == capturedID }!
+        check(capturedRow.source == "cli" && capturedRow.captureRequestID == "xlys-cap-9", "Capture origin exposed for change targeting")
+        check(range.checklist.map(\.id) == [pending.id], "Range keeps the checklist")
+        let reencoded = try JSONEncoder().encode(try JSONDecoder().decode([AgendaItem].self, from: JSONEncoder().encode([paused])))
+        check(AgendaRevision.of(try JSONDecoder().decode([AgendaItem].self, from: reencoded)[0]) == AgendaRevision.of(paused), "Revision stable across encode/decode")
+        var touched = paused; touched.note = "x"
+        check(AgendaRevision.of(touched) != AgendaRevision.of(paused), "Revision changes with content")
+        rejects("Range over 31 days rejected") { _ = try AgendaQueryRequest.decode(Data("{\"from\":\"2026-10-01\",\"to\":\"2026-11-01\"}".utf8)).days(now: now) }
+        check((try? AgendaQueryRequest.decode(Data("{\"from\":\"2026-10-01\",\"to\":\"2026-10-31\"}".utf8)).days(now: now).count) == 31, "Exactly 31 days accepted")
+        for body in ["{\"from\":\"2026-10-13\"}", "{\"to\":\"2026-10-13\"}", "{\"date\":\"2026-10-13\",\"from\":\"2026-10-13\",\"to\":\"2026-10-14\"}"] {
+            rejects("Incomplete or mixed range rejected") { _ = try AgendaQueryRequest.decode(Data(body.utf8)) }
+        }
+        rejects("Reversed range rejected") { _ = try AgendaQueryRequest.decode(Data("{\"from\":\"2026-10-14\",\"to\":\"2026-10-13\"}".utf8)).days(now: now) }
 
         let shanghaiMidnight = today.addingTimeInterval(30 * 60)
         check(try AgendaQueryRequest.decode(Data("{}".utf8)).day(now: shanghaiMidnight) == today, "Default query follows Shanghai date near UTC boundary")
@@ -125,6 +164,10 @@ import Foundation
         futureEnvironment.readInput = { Data("{\"date\":\"2026-10-14\"}".utf8) }
         check(AgendaQueryCLI.run(arguments: ["--query", "--qa", "--data-dir", isolated.path], productionRoot: production, environment: futureEnvironment) == 0, "Explicit future request uses actual CLI path")
         check((try JSONSerialization.jsonObject(with: outputs.last!) as! [String: Any])["date"] as? String == "2026-10-14", "CLI future response reports requested date")
+        var rangeEnvironment = environment
+        rangeEnvironment.readInput = { Data("{\"from\":\"2026-11-09\",\"to\":\"2026-11-15\"}".utf8) }
+        check(AgendaQueryCLI.run(arguments: ["--query", "--qa", "--data-dir", isolated.path], productionRoot: production, environment: rangeEnvironment) == 0, "Range query uses the actual CLI path")
+        check(((try JSONSerialization.jsonObject(with: outputs.last!) as! [String: Any])["days"] as! [Any]).count == 7, "CLI range returns 7 days at once")
         var fakeProductionEnvironment = environment
         fakeProductionEnvironment.readDocument = { fileURL in
             check(fileURL == production.appendingPathComponent("agenda.json"), "Production mode uses only declared default file")

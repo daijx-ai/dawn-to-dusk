@@ -375,6 +375,123 @@ class HermesCaptureTests(unittest.TestCase):
         self.assertFalse(result["saved"])
         self.assertNotIn("private detail", json.dumps(result))
 
+    # --change
+    def change_runner(self, *, update=None, returncode=0, stdout=None):
+        def fake(argv, **kwargs):
+            self.calls.append((argv, kwargs))
+            payload = json.loads(kwargs["input"])
+            view = {"id": ITEM_ID, "revision": "r1", "title": "交材料", "time": "10:00"}
+            response = {"ok": True, "status": "updated", "request_id": payload["request_id"], "item_id": ITEM_ID,
+                        "item_exists": True, "saved": True, "before": dict(view, time="14:00"), "after": view}
+            if update:
+                response.update(update)
+            return SimpleNamespace(returncode=returncode, stdout=stdout if stdout is not None else json.dumps(response), stderr="private")
+        return fake
+
+    def edit(self, payload=None, **kwargs):
+        body = {"op": "update", "target": {"item_id": ITEM_ID}, "fields": {"time": "10:00"}} if payload is None else payload
+        return capture_module.change(body, environment=kwargs.pop("environment", ENV), runner=kwargs.pop("runner", self.change_runner()), **kwargs)
+
+    def test_change_uses_fixed_cli_forces_hermes_source_and_stable_id(self):
+        first, second = self.edit(), self.edit()
+        argv, options = self.calls[0]
+        self.assertEqual(argv, [capture_module.BINARY, "--change"])
+        wire = json.loads(options["input"])
+        self.assertEqual(wire["source"], "hermes")
+        self.assertNotIn("entry_index", wire)
+        self.assertEqual(first["request_id"], second["request_id"])
+        self.assertRegex(first["request_id"], r"^hermes:[a-f0-9]{64}$")
+        self.assertNotEqual(first["request_id"], capture_module.capture({"title": "x"}, environment=ENV, runner=self.runner())["request_id"])
+        self.assertTrue(first["ok"] and first["saved"])
+        self.assertEqual((first["before"]["time"], first["after"]["time"]), ("14:00", "10:00"))
+        for key in capture_module.MESSAGE_KEYS:
+            self.assertNotIn(key, options["env"])
+
+    def test_change_rejects_bad_shapes_before_process(self):
+        for body in ({"op": "erase", "target": {"item_id": ITEM_ID}},
+                     {"op": "delete", "target": {"item_id": ITEM_ID, "capture_request_id": "x"}},
+                     {"op": "delete", "target": {"item_id": "nope"}},
+                     {"op": "update", "target": {"item_id": ITEM_ID}},
+                     {"op": "delete", "target": {"item_id": ITEM_ID}, "source": "cli"},
+                     {"op": "reschedule_once", "target": {"occurrence_id": ITEM_ID + ":2026-02-30"}, "new_time": "09:00"},
+                     {"op": "reschedule_once", "target": {"item_id": ITEM_ID}, "occurrence_id": ITEM_ID + ":2026-11-12", "new_time": "9:00"},
+                     "not an object"):
+            result = capture_module.change(body, environment=ENV, runner=self.change_runner())
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "invalid")
+        self.assertEqual(self.calls, [])
+
+    def test_change_failures_keep_current_and_never_claim_saved(self):
+        for status in ("conflict", "not_found", "forbidden", "invalid"):
+            result = self.edit(runner=self.change_runner(update={"ok": False, "status": status, "saved": False, "error": "x", "current": {"title": "交材料"}}, returncode=1))
+            self.assertFalse(result["ok"])
+            self.assertFalse(result["saved"])
+            self.assertEqual(result["status"], status)
+        self.assertEqual(result["current"]["title"], "交材料")
+
+    def test_change_success_requires_saved_and_matching_id(self):
+        self.assertEqual(self.edit(runner=self.change_runner(update={"saved": False}))["status"], "malformed_response")
+        self.assertEqual(self.edit(runner=self.change_runner(update={"request_id": "other"}))["status"], "malformed_response")
+        self.assertEqual(self.edit(runner=self.change_runner(update={"status": "created"}))["status"], "malformed_response")
+        self.assertEqual(self.edit(runner=self.change_runner(returncode=1))["status"], "malformed_response")
+        self.assertEqual(self.edit(runner=self.change_runner(stdout="garbage"))["status"], "malformed_response")
+
+    def test_change_delete_and_already_processed_are_reported(self):
+        deleted = self.edit({"op": "delete", "target": {"item_id": ITEM_ID}},
+                            runner=self.change_runner(update={"status": "deleted", "item_exists": False, "after": None, "message": "已删除，可用 op:restore 原样恢复"}))
+        self.assertTrue(deleted["ok"] and deleted["saved"])
+        self.assertFalse(deleted["item_exists"])
+        self.assertIn("restore", deleted["message"])
+        replay = self.edit(runner=self.change_runner(update={"status": "already_processed"}))
+        self.assertEqual(replay["status"], "already_processed")
+
+    def test_change_dry_run_is_preview_only(self):
+        result = self.edit(dry_run=True, runner=self.change_runner(update={"status": "preview", "saved": False, "dry_run": True, "expected_status": "updated"}))
+        self.assertEqual(self.calls[0][0], [capture_module.BINARY, "--change", "--dry-run"])
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["saved"])
+        self.assertEqual(result["expected_status"], "updated")
+        self.assertEqual(self.edit(dry_run=True, runner=self.change_runner())["status"], "malformed_response")
+
+    def test_main_change_routes_only_to_change(self):
+        output = io.StringIO()
+        actual = capture_module.change
+        def safe(payload, dry_run=False):
+            return actual(payload, environment=ENV, runner=self.change_runner(), dry_run=dry_run)
+        body = json.dumps({"op": "update", "target": {"item_id": ITEM_ID}, "fields": {"title": "x"}})
+        with mock.patch.object(sys, "argv", ["capture.py", "--change"]), mock.patch.object(sys, "stdin", io.StringIO(body)), mock.patch.object(sys, "stdout", output), mock.patch.object(capture_module, "change", side_effect=safe), mock.patch.object(capture_module, "capture", side_effect=AssertionError("change cannot capture")):
+            code = capture_module.main()
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["status"], "updated")
+
+    def range_response(self):
+        days = []
+        for offset in range(7):
+            day = "2026-11-%02d" % (9 + offset)
+            row = {"id": ITEM_ID, "occurrence_id": ITEM_ID + ":" + day, "title": "上班打卡", "date": day, "time": "09:00", "base_time": "09:00",
+                   "duration_minutes": 0, "repeat_rule": "weekdays", "completed": False, "tentative": False,
+                   "revision": "rabc", "note": "", "source": "cli", "capture_request_id": "xlys-cap-1", "feishu_readonly": False}
+            days.append({"date": day, "schedule": [row] if offset < 5 else [], "skipped": []})
+        return {"ok": True, "status": "queried", "read_only": True, "timezone": "Asia/Shanghai", "from": "2026-11-09", "to": "2026-11-15",
+                "generated_at": "2026-11-09T01:00:00Z", "days": days, "checklist": []}
+
+    def test_range_query_returns_seven_days_with_change_fields(self):
+        result = self.read({"from": "2026-11-09", "to": "2026-11-15"}, runner=self.query_runner(self.range_response()))
+        self.assertTrue(result["ok"])
+        self.assertEqual(json.loads(self.calls[0][1]["input"]), {"from": "2026-11-09", "to": "2026-11-15"})
+        self.assertEqual(len(result["days"]), 7)
+        row = result["days"][0]["schedule"][0]
+        self.assertEqual((row["revision"], row["source"], row["capture_request_id"]), ("rabc", "cli", "xlys-cap-1"))
+
+    def test_range_query_rejects_bad_ranges_and_mismatched_days(self):
+        for body in ({"from": "2026-11-09"}, {"from": "2026-11-15", "to": "2026-11-09"}, {"from": "2026-10-01", "to": "2026-11-01"},
+                     {"date": "2026-11-09", "from": "2026-11-09", "to": "2026-11-10"}):
+            self.assertEqual(self.read(body)["status"], "invalid")
+        self.assertEqual(self.calls, [])
+        broken = self.range_response()
+        broken["days"].pop()
+        self.assertEqual(self.read({"from": "2026-11-09", "to": "2026-11-15"}, runner=self.query_runner(broken))["status"], "malformed_response")
+
 
 if __name__ == "__main__":
     unittest.main()

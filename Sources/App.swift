@@ -299,7 +299,7 @@ struct AgendaCaptureReceiver {
     func focusTextEntry() { NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil) }
     @objc private func showRequested() { showPanel() }
     @objc private func processCaptures() {
-        captureInbox.processPending { store.capture($0) }
+        captureInbox.processPending(handler: { self.store.capture($0) }, changeHandler: { self.store.applyChange($0) })
         writeRuntimeEvidence()
     }
     @objc private func statusClicked() {
@@ -422,6 +422,32 @@ struct AgendaCaptureReceiver {
     }
 }
 
+enum ChaoxiHelp {
+    static let text = """
+    朝夕 · Mac 常驻日程
+    正常使用请打开 朝夕.app。隔离验收：--qa --data-dir <绝对路径>。
+
+    本机捕获：--capture [--dry-run] [--no-launch] [--qa --data-dir <绝对路径>]
+      stdin JSON：request_id、title；可选 note、date（YYYY-MM-DD）、time（HH:mm）、duration_minutes、source（hermes/cli）、repeat_rule（none/daily/weekdays/weekly）。
+      无日期进入独立清单，含时刻必须给日期，重复安排须有日期和时刻。
+
+    本机修改：--change [--dry-run] [--no-launch] [--qa --data-dir <绝对路径>]
+      stdin JSON：request_id、op、target（item_id / occurrence_id / capture_request_id 三选一）；可选 if_match（查询返回的 revision）、source（hermes/cli）。
+      op=update：fields 只改传入的 title、note、date、time（HH:mm 或 null）、duration_minutes、repeat_rule、tentative、reminder_enabled。
+      op=reschedule_once：occurrence_id + new_time，可选 new_date；只改这一次。
+      op=complete / reopen：重复事项需 occurrence_id；清单和一次性事项可省略。
+      op=skip_once：occurrence_id；op=pause_range：from、to（最多 366 天）；op=resume：occurrence_id 或 from/to，省略则恢复全部跳过。
+      op=delete：保存完整快照；op=restore：按 item_id 原样恢复最近一次外部删除。
+      飞书同步事项返回 forbidden；if_match 过期或窗口里正有未保存草稿返回 conflict；同一 request_id 重复提交返回 already_processed。
+      回执含 ok、status、item_exists、saved、before、after、request_id；以回执为准，不以退出码判断。
+      --dry-run 只读已保存数据并返回预期 before/after（status=preview），不排队、不保存、不改提醒。
+
+    只读查询：--query [--qa --data-dir <绝对路径>]
+      stdin JSON：{}、{"date":"YYYY-MM-DD"} 或 {"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}（最多 31 天）。
+      默认查询北京时间今天；返回日程（含 revision、note、source、capture_request_id、feishu_readonly）、已跳过的重复事项和全部清单。不启动窗口、不修改数据。
+    """
+}
+
 #if !INTEGRATION_TESTS
 @main struct ChaoxiLauncher {
     @MainActor static func main() {
@@ -431,8 +457,13 @@ struct AgendaCaptureReceiver {
             exit(AgendaQueryCLI.run(arguments: Array(args.dropFirst()), productionRoot: productionRoot))
         }
         if args.contains("--help") {
-            print("朝夕 · Mac 常驻日程\n正常使用请打开 朝夕.app。隔离验收：--qa --data-dir <绝对路径>。\n本机捕获：--capture [--dry-run] [--no-launch] [--qa --data-dir <绝对路径>]。\n通过 stdin 传 JSON：request_id、title；可选 note、date（YYYY-MM-DD）、time（HH:mm）、duration_minutes、source（hermes/cli）、repeat_rule（none/daily/weekdays/weekly）。无日期进入独立清单，含时刻必须给日期，重复安排须有日期和时刻。\n只读查询：--query [--qa --data-dir <绝对路径>]；stdin JSON 为 {} 或 {\"date\":\"YYYY-MM-DD\"}。默认查询北京时间今天，返回当天日程和全部清单，不启动窗口或修改数据。")
+            print(ChaoxiHelp.text)
             return
+        }
+        if args.contains("--change") {
+            var environment = CaptureCLI.defaultEnvironment
+            environment.previewChange = { request, root in try AgendaChangePreviewCLI.preview(request, root: root) }
+            exit(CaptureCLI.runChange(arguments: Array(args.dropFirst()), bundleURL: Bundle.main.bundleURL, productionRoot: productionRoot, environment: environment))
         }
         if args.contains("--capture") {
             exit(CaptureCLI.run(arguments: Array(args.dropFirst()), bundleURL: Bundle.main.bundleURL, productionRoot: productionRoot))

@@ -50,6 +50,17 @@ private struct AgendaDocument: Codable {
     var settings: AgendaSettings
     var captureReceipts: [String: AgendaCaptureReceipt]? = nil
     var feishuSyncState: FeishuSyncState? = nil
+    var changeReceipts: [String: AgendaChangeReceipt]? = nil
+    var changeLog: [AgendaChangeRecord]? = nil
+}
+
+private struct AgendaUndoStep {
+    var items: [AgendaItem]
+    var settings: AgendaSettings
+    /// Set when undoing this step reverts an external `--change` record.
+    var changeID: UUID? = nil
+    /// Set when undoing this step re-applies a record that was undone from Settings.
+    var reopensChangeID: UUID? = nil
 }
 
 @MainActor final class AgendaStore: ObservableObject {
@@ -65,7 +76,18 @@ private struct AgendaDocument: Codable {
     private var savedItems: [AgendaItem] = []
     private var savedSettings = AgendaSettings()
     private var savedCaptureReceipts: [String: AgendaCaptureReceipt] = [:]
-    private var history: [([AgendaItem], AgendaSettings)] = []
+    private var savedChangeReceipts: [String: AgendaChangeReceipt] = [:]
+    /// Persisted log of external changes, newest last.
+    @Published private(set) var externalChanges: [AgendaChangeRecord] = []
+    private var history: [AgendaUndoStep] = []
+    private var pendingUndoChangeID: UUID?
+    private var pendingReopenChangeID: UUID?
+    private var draftRegistry: [UUID: Set<UUID>] = [:]
+    /// Items that an open window editor holds as an unsaved draft.
+    var draftItemIDs: Set<UUID> { draftRegistry.values.reduce(into: Set<UUID>()) { $0.formUnion($1) } }
+    func registerDraft(_ token: UUID, ids: Set<UUID>) { if ids.isEmpty { draftRegistry.removeValue(forKey: token) } else { draftRegistry[token] = ids } }
+    func releaseDraft(_ token: UUID) { draftRegistry.removeValue(forKey: token) }
+    var captureReceiptsSnapshot: [String: AgendaCaptureReceipt] { savedCaptureReceipts }
 
     init(directory: URL? = nil, seedIfEmpty: Bool = true) {
         let root = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Chaoxi", isDirectory: true)
@@ -77,12 +99,15 @@ private struct AgendaDocument: Codable {
                 try Self.validate(document.items, settings: document.settings)
                 try Self.validateReceipts(document.captureReceipts ?? [:])
                 try Self.validateFeishuState(document.feishuSyncState, items: document.items)
+                try Self.validateChangeData(document.changeReceipts ?? [:], log: document.changeLog ?? [])
                 items = document.items
                 settings = document.settings
                 savedItems = items
                 savedSettings = settings
                 savedCaptureReceipts = document.captureReceipts ?? [:]
                 feishuSyncState = document.feishuSyncState
+                savedChangeReceipts = document.changeReceipts ?? [:]
+                externalChanges = document.changeLog ?? []
                 if settings.pinnedOccurrenceID != nil && Self.pinnedFocus(items: items, settings: settings) == nil {
                     _ = commit(items, settings: settings, remember: false)
                 }
@@ -125,6 +150,65 @@ private struct AgendaDocument: Codable {
         }
         return AgendaCaptureResult(ok: true, requestID: normalized.requestID, status: "created", itemID: item.id, itemExists: true)
     }
+    /// External `--change` request. The window's draft registry blocks edits to items being edited.
+    func applyChange(_ request: AgendaChangeRequest, now: Date = Date()) -> AgendaChangeResult {
+        guard !locked else { return AgendaChangeResult(ok: false, status: "save_failed", requestID: request.requestID, error: L("日程文件受保护，未修改")) }
+        let state = AgendaChangeState(items: savedItems, receipts: savedChangeReceipts, log: externalChanges)
+        var (result, next) = AgendaChangeEngine.apply(request, state: state, captureReceipts: savedCaptureReceipts, editing: draftItemIDs, now: now)
+        guard let next else { return result }
+        let mutates = next.items != savedItems
+        pendingUndoChangeID = mutates ? result.recordID : nil
+        defer { pendingUndoChangeID = nil }
+        guard commit(next.items, settings: settings, changeReceipts: next.receipts, changeLog: next.log, remember: mutates) else {
+            result = AgendaChangeResult(ok: false, status: "save_failed", requestID: request.requestID, itemID: result.itemID,
+                                        itemExists: savedItems.contains { $0.id == result.itemID }, error: error ?? L("保存失败，修改未生效"))
+            return result
+        }
+        return result
+    }
+    /// Reverts one external change if the item is still exactly as that change left it.
+    @discardableResult func undoExternalChange(_ id: UUID, now: Date = Date()) -> Bool {
+        guard let position = externalChanges.firstIndex(where: { $0.id == id }), externalChanges[position].undoneAt == nil else {
+            error = L("这条外部改动已撤销或不存在"); return false
+        }
+        let record = externalChanges[position]
+        let current = savedItems.first { $0.id == record.itemID }
+        guard current == record.after else { error = L("该事项在这次外部改动后又有修改，不能直接撤销；请手动调整"); return false }
+        var candidate = savedItems
+        if let index = candidate.firstIndex(where: { $0.id == record.itemID }) {
+            if let before = record.before { candidate[index] = before } else { candidate.remove(at: index) }
+        } else if let before = record.before { candidate.insert(before, at: min(record.index ?? candidate.count, candidate.count)) }
+        var log = externalChanges
+        log[position].undoneAt = now
+        if record.op == AgendaChangeOp.restore.rawValue, let deletion = log.lastIndex(where: { $0.itemID == record.itemID && $0.after == nil && $0.before != nil && $0.undoneAt != nil && $0.id != record.id }) {
+            log[deletion].undoneAt = nil
+        }
+        pendingReopenChangeID = record.id
+        defer { pendingReopenChangeID = nil }
+        return commit(candidate, settings: settings, changeLog: log)
+    }
+    /// Window editors: false when the saved item changed after the editor opened.
+    /// Completion, skip, snooze and checklist state are live and preserved on save.
+    func isUnchangedSinceOpened(_ original: AgendaItem) -> Bool {
+        guard let current = savedItems.first(where: { $0.id == original.id }) else { return false }
+        func content(_ item: AgendaItem) -> AgendaItem {
+            var value = item
+            value.completedDays = []; value.snoozes = [:]; value.skippedDays = nil; value.pausedRanges = nil; value.checklistState = item.checklistState.map { _ in .pending }
+            return value
+        }
+        return content(current) == content(original)
+    }
+    /// Window action: show a skipped/paused day again (splits a pause around it).
+    @discardableResult func unskip(_ occurrence: Occurrence, wholePause: Bool = false) -> Bool {
+        guard let index = savedItems.firstIndex(where: { $0.id == occurrence.item.id }), savedItems[index].feishu == nil else { error = L("事项已不存在"); return false }
+        let key = AgendaClock.dayKey(occurrence.day)
+        var candidate = savedItems
+        if wholePause, let range = (candidate[index].pausedRanges ?? []).first(where: { $0.contains(key) }) {
+            candidate[index] = AgendaSkipEditing.resume(candidate[index], from: range.from, to: range.to)
+        } else { candidate[index] = AgendaSkipEditing.resume(candidate[index], from: key, to: key) }
+        guard candidate != savedItems else { return true }
+        return commit(candidate, settings: settings)
+    }
     @discardableResult func upsert(_ incoming: AgendaItem) -> Bool {
         upsertBatch([incoming])
     }
@@ -159,8 +243,10 @@ private struct AgendaDocument: Codable {
                 }
                 item.checklistState = candidate[index].checklistState
                 if item.isChecklist { item.date = candidate[index].date }
-                // Completion and snooze are live occurrence state, not editable draft fields.
+                // Completion, skip and snooze are live occurrence state, not editable draft fields.
                 item.completedDays = candidate[index].completedDays
+                item.skippedDays = item.repeatRule == .none ? nil : candidate[index].skippedDays
+                item.pausedRanges = item.repeatRule == .none ? nil : candidate[index].pausedRanges
                 if candidate[index].date != item.date || candidate[index].timeMinutes != item.timeMinutes || candidate[index].repeatRule != item.repeatRule || candidate[index].weeklyTimes != item.weeklyTimes {
                     item.snoozes = [:]
                     item.postponedTimes = nil
@@ -253,8 +339,27 @@ private struct AgendaDocument: Codable {
     }
     func undo() {
         guard let previous = history.last else { return }
-        if commit(previous.0, settings: previous.1, remember: false) { history.removeLast() }
+        var log: [AgendaChangeRecord]?
+        if let id = previous.reopensChangeID, let position = externalChanges.firstIndex(where: { $0.id == id && $0.undoneAt != nil }) {
+            // Undoing a Settings undo re-applies that external change; keep the log truthful.
+            log = externalChanges
+            log![position].undoneAt = nil
+            let record = externalChanges[position]
+            if record.op == AgendaChangeOp.restore.rawValue, let deletion = log!.lastIndex(where: { $0.itemID == record.itemID && $0.after == nil && $0.before != nil && $0.undoneAt == nil && $0.id != record.id }) {
+                log![deletion].undoneAt = Date()
+            }
+        } else if let id = previous.changeID, let position = externalChanges.firstIndex(where: { $0.id == id && $0.undoneAt == nil }) {
+            log = externalChanges
+            log![position].undoneAt = Date()
+            let record = externalChanges[position]
+            if record.op == AgendaChangeOp.restore.rawValue, let deletion = log!.lastIndex(where: { $0.itemID == record.itemID && $0.after == nil && $0.before != nil && $0.undoneAt != nil && $0.id != record.id }) {
+                log![deletion].undoneAt = nil
+            }
+        }
+        if commit(previous.items, settings: previous.settings, changeLog: log, remember: false) { history.removeLast() }
     }
+    /// True when the next window undo reverts an external change.
+    var undoRevertsExternalChange: Bool { history.last?.changeID != nil }
     func occurrences(on date: Date) -> [Occurrence] { AgendaClock.occurrences(items: items, on: date) }
     func editableDayItems(on date: Date) -> [AgendaItem] {
         var seen = Set<UUID>()
@@ -390,7 +495,7 @@ private struct AgendaDocument: Codable {
         do {
             guard let backup = try preserveCurrentFile(prefix: "corrupt") else { throw StoreError.invalid(L("待恢复文件已不存在")) }
             recoveryBackupURL = backup
-            return commit(AgendaClock.seed(), settings: AgendaSettings(), receipts: [:], syncState: nil, replaceSyncState: true, remember: false, allowLocked: true)
+            return commit(AgendaClock.seed(), settings: AgendaSettings(), receipts: [:], syncState: nil, replaceSyncState: true, changeReceipts: [:], changeLog: [], remember: false, allowLocked: true)
         } catch {
             self.error = L("恢复失败，原文件未替换：\(error.localizedDescription)")
             return false
@@ -404,8 +509,9 @@ private struct AgendaDocument: Codable {
             try Self.validate(document.items, settings: document.settings)
             try Self.validateReceipts(document.captureReceipts ?? [:])
             try Self.validateFeishuState(document.feishuSyncState, items: document.items)
+            try Self.validateChangeData(document.changeReceipts ?? [:], log: document.changeLog ?? [])
             recoveryBackupURL = try preserveCurrentFile(prefix: "before-restore")
-            let restored = commit(document.items, settings: document.settings, receipts: document.captureReceipts ?? [:], syncState: document.feishuSyncState, replaceSyncState: true, remember: false, allowLocked: true)
+            let restored = commit(document.items, settings: document.settings, receipts: document.captureReceipts ?? [:], syncState: document.feishuSyncState, replaceSyncState: true, changeReceipts: document.changeReceipts ?? [:], changeLog: document.changeLog ?? [], remember: false, allowLocked: true)
             if restored { history.removeAll() }
             return restored
         } catch {
@@ -423,7 +529,7 @@ private struct AgendaDocument: Codable {
         return backup
     }
 
-    @discardableResult private func commit(_ candidate: [AgendaItem], settings candidateSettings: AgendaSettings, receipts candidateReceipts: [String: AgendaCaptureReceipt]? = nil, syncState candidateSyncState: FeishuSyncState? = nil, replaceSyncState: Bool = false, remember: Bool = true, allowLocked: Bool = false) -> Bool {
+    @discardableResult private func commit(_ candidate: [AgendaItem], settings candidateSettings: AgendaSettings, receipts candidateReceipts: [String: AgendaCaptureReceipt]? = nil, syncState candidateSyncState: FeishuSyncState? = nil, replaceSyncState: Bool = false, changeReceipts candidateChangeReceipts: [String: AgendaChangeReceipt]? = nil, changeLog candidateChangeLog: [AgendaChangeRecord]? = nil, remember: Bool = true, allowLocked: Bool = false) -> Bool {
         guard !locked || allowLocked else {
             error = L("损坏文件仍受保护。请先恢复或移走该文件，再重新打开朝夕。")
             items = savedItems; settings = savedSettings
@@ -435,6 +541,9 @@ private struct AgendaDocument: Codable {
             try Self.validateFeishuState(syncState, items: candidate)
             let receipts = candidateReceipts ?? savedCaptureReceipts
             try Self.validateReceipts(receipts)
+            let changeReceipts = candidateChangeReceipts ?? savedChangeReceipts
+            let changeLog = candidateChangeLog ?? externalChanges
+            try Self.validateChangeData(changeReceipts, log: changeLog)
             var candidateSettings = candidateSettings
             if Self.pinnedFocus(items: candidate, settings: candidateSettings) == nil {
                 candidateSettings.pinnedOccurrenceID = nil
@@ -442,13 +551,16 @@ private struct AgendaDocument: Codable {
             }
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(AgendaDocument(items: candidate, settings: candidateSettings, captureReceipts: receipts.isEmpty ? nil : receipts, feishuSyncState: syncState))
+            let data = try encoder.encode(AgendaDocument(items: candidate, settings: candidateSettings, captureReceipts: receipts.isEmpty ? nil : receipts, feishuSyncState: syncState,
+                                                       changeReceipts: changeReceipts.isEmpty ? nil : changeReceipts, changeLog: changeLog.isEmpty ? nil : changeLog))
             try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: fileURL, options: .atomic)
-            if remember { history.append((savedItems, savedSettings)) }
+            if remember { history.append(AgendaUndoStep(items: savedItems, settings: savedSettings, changeID: pendingUndoChangeID, reopensChangeID: pendingReopenChangeID)) }
             locked = false
             savedItems = candidate; savedSettings = candidateSettings
             savedCaptureReceipts = receipts
+            savedChangeReceipts = changeReceipts
+            if externalChanges != changeLog { externalChanges = changeLog }
             feishuSyncState = syncState
             items = candidate; settings = candidateSettings
             error = nil
@@ -500,14 +612,14 @@ private struct AgendaDocument: Codable {
             // Rebase source-owned data in every local undo snapshot onto the successful source state.
             let mirrors = candidate.filter { $0.feishu != nil }
             history = history.map { previous in
-                var rebased = previous.0
+                var rebased = previous.items
                 rebased.removeAll { old in old.feishu != nil && !mirrors.contains(where: { $0.id == old.id }) }
                 for source in mirrors {
                     if let index = rebased.firstIndex(where: { $0.id == source.id }) {
                         rebased[index] = Self.mergeFeishuSource(source, local: rebased[index])
                     } else { rebased.append(source) }
                 }
-                return (rebased, previous.1)
+                return AgendaUndoStep(items: rebased, settings: previous.settings, changeID: previous.changeID, reopensChangeID: previous.reopensChangeID)
             }
             return true
         } catch { self.error = L("飞书同步未生效：\(error.localizedDescription)"); return false }
@@ -538,6 +650,15 @@ private struct AgendaDocument: Codable {
                 throw StoreError.invalid(L("捕获回执无效"))
             }
         }
+    }
+    private static func validateChangeData(_ receipts: [String: AgendaChangeReceipt], log: [AgendaChangeRecord]) throws {
+        for (id, receipt) in receipts {
+            guard AgendaCaptureRequest.validRequestID(id), receipt.fingerprint.utf8.count == 64,
+                  receipt.fingerprint.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+                  validDate(receipt.createdAt), receipt.source == "hermes" || receipt.source == "cli" else { throw StoreError.invalid(L("外部修改回执无效")) }
+        }
+        guard log.count <= 100_000, Set(log.map(\.id)).count == log.count,
+              log.allSatisfy({ validDate($0.at) && AgendaChangeOp(rawValue: $0.op) != nil && ($0.before != nil || $0.after != nil) }) else { throw StoreError.invalid(L("外部修改记录无效")) }
     }
     private static func pinnedOccurrence(items: [AgendaItem], settings: AgendaSettings) -> Occurrence? {
         pinnedFocus(items: items, settings: settings)?.occurrence
@@ -590,8 +711,15 @@ private struct AgendaDocument: Codable {
                       AgendaClock.dayKey(date) == key else { throw StoreError.invalid(L("事项状态日期无效")) }
             }
             guard item.snoozes.values.allSatisfy(validDate) else { throw StoreError.invalid(L("稍后提醒时刻无效")) }
+            if item.hasSkips {
+                guard item.feishu == nil, !item.isChecklist,
+                      (item.skippedDays ?? []).allSatisfy({ AgendaClock.day(fromKey: $0) != nil }),
+                      (item.pausedRanges ?? []).allSatisfy({ $0.from <= $0.to && AgendaClock.day(fromKey: $0.from) != nil && AgendaClock.day(fromKey: $0.to) != nil }) else {
+                    throw StoreError.invalid(L("跳过或暂停的日期无效"))
+                }
+            }
             for (key, target) in item.postponedTimes ?? [:] {
-                var original = item; original.postponedTimes = nil
+                var original = item; original.postponedTimes = nil; original.skippedDays = nil; original.pausedRanges = nil
                 guard validDate(target), let occurrence = AgendaClock.occurrence(items: [original], id: item.id.uuidString + ":" + key),
                       occurrence.due != nil else { throw StoreError.invalid(L("单次安排时刻无效")) }
             }

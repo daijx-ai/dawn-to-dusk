@@ -197,6 +197,13 @@ struct AgendaView: View {
                                                 ForEach(untimed) { row($0, now: now) }
                                             }.padding(.vertical, 6).id("untimed")
                                         }
+                                        let skipped = AgendaClock.skippedOccurrences(items: store.items, on: store.selectedDay)
+                                        if !skipped.isEmpty {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(L("已跳过 · \(skipped.count) 件")).font(.system(size: 13, weight: .semibold)).foregroundStyle(palette.secondary)
+                                                ForEach(skipped) { skippedRow($0) }
+                                            }.padding(.vertical, 6).id("skipped")
+                                        }
                                         if !earlier.isEmpty {
                                             DisclosureGroup(L("\(earlier.count) 件之前的安排待处理")) {
                                                 ForEach(earlier) { o in
@@ -663,6 +670,29 @@ struct AgendaView: View {
             .overlay(alignment: .bottom) { Rectangle().fill(palette.divider).frame(height: 0.5).padding(.leading, 42) }
     }
 
+    /// A skipped or paused repeating occurrence stays visible, so it never looks silently deleted.
+    private func skippedRow(_ o: Occurrence) -> some View {
+        let key = AgendaClock.dayKey(o.day)
+        let pause = (o.item.pausedRanges ?? []).first { $0.contains(key) }
+        let detail = (o.due.map(AgendaClock.timeText) ?? L("未定时")) + " · " + (pause.map { L("暂停至 \($0.to) · 不提醒") } ?? L("已跳过这一天 · 不提醒"))
+        return HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "forward.end").font(.system(size: 14)).foregroundStyle(palette.secondary).frame(width: 24, height: 29)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(o.title).font(.system(size: 15, weight: .medium)).foregroundStyle(palette.secondary).lineLimit(2)
+                Text(detail).font(.system(size: 11)).foregroundStyle(palette.secondary).lineLimit(1).help(detail)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if pause != nil {
+                Menu(L("恢复")) {
+                    Button(L("只恢复这一天")) { _ = store.unskip(o) }
+                    Button(L("结束整段暂停")) { _ = store.unskip(o, wholePause: true) }
+                }.controlSize(.small).fixedSize().help(L("恢复后这一天会重新显示并提醒"))
+            } else {
+                Button(L("恢复")) { _ = store.unskip(o) }.controlSize(.small).help(L("恢复后这一天会重新显示并提醒"))
+            }
+        }.padding(.vertical, 8).padding(.horizontal, 9)
+            .accessibilityElement(children: .combine).accessibilityLabel(L("已跳过 \(o.title)，") + detail)
+    }
+
     private func checklistContent() -> some View {
         let pending = store.checklistItems()
         let completed = store.checklistItems(includeCompleted: true).filter { $0.checklistState == .completed }
@@ -718,7 +748,7 @@ struct AgendaView: View {
                 TextField(L("写一件要做的事…"), text: $quickChecklistTitle).font(.system(size: 13)).textFieldStyle(.plain).focused($quickChecklistFocused).simultaneousGesture(TapGesture().onEnded { controller.focusTextEntry(); quickChecklistFocused = true }).onSubmit(addQuickChecklist).padding(.horizontal, 9).frame(height: 34).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 9)).accessibilityLabel(L("新清单事项，回车添加"))
                 Button { addQuickChecklist() } label: { Image(systemName: "plus").font(.system(size: 12, weight: .semibold)).frame(width: 30, height: 34).foregroundStyle(palette.primaryInk).background(palette.primaryFill, in: RoundedRectangle(cornerRadius: 9)).contentShape(Rectangle()) }.buttonStyle(.plain).disabled(quickChecklistTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).help(L("添加清单事项")).accessibilityLabel(L("添加清单事项"))
                 Menu {
-                    Button(L("撤销上一步")) { store.undo() }
+                    Button(store.undoRevertsExternalChange ? L("撤销外部改动") : L("撤销上一步")) { store.undo() }
                 } label: { Image(systemName: "ellipsis").frame(width: 24, height: 34).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 9)) }.menuStyle(.borderlessButton).fixedSize().help(L("清单更多操作")).padding(.trailing, 12)
             }
         }.padding(.horizontal, narrow ? 12 : 18).padding(.top, 7).padding(.bottom, 10).background(palette.controlFill.opacity(0.5))
@@ -745,7 +775,7 @@ struct AgendaView: View {
             }.buttonStyle(.plain).accessibilityLabel(L("编辑日程")).help(L("直接修改所有日程的时间、每天或每周重复方式"))
             Button { add() } label: { Label(L("添加日程"), systemImage: "plus").font(.system(size: 12, weight: .semibold)).frame(maxWidth: .infinity).padding(.vertical, panelHeight < 650 ? 7 : 11).foregroundStyle(palette.primaryInk).background(palette.primaryFill, in: RoundedRectangle(cornerRadius: 12)) }.buttonStyle(.plain)
             Menu {
-                Button(L("撤销上一步")) { store.undo() }
+                Button(store.undoRevertsExternalChange ? L("撤销外部改动") : L("撤销上一步")) { store.undo() }
                 Button(store.settings.showCompleted ? L("隐藏已完成") : L("显示已完成")) { store.settings.showCompleted.toggle(); _ = store.save() }
             } label: { Image(systemName: "ellipsis").font(.system(size: 15)).frame(width: 36, height: 36).background(palette.controlFill, in: RoundedRectangle(cornerRadius: 12)) }.menuStyle(.borderlessButton).fixedSize().help(L("更多")).padding(.trailing, 12)
           }
@@ -880,6 +910,8 @@ struct ItemEditor: View {
     @State private var originalItem: AgendaItem?
     @State private var onlyThisTime = true
     @State private var showingDetails = false
+    // An open editor is an unsaved draft: external `--change` requests for this item return conflict.
+    @State private var draftToken = UUID()
     @FocusState private var titleFocused: Bool
     private var canChooseScope: Bool { occurrence?.due != nil && item != nil && item?.repeatRule != RepeatRule.none }
     private var editingSingleTime: Bool { canChooseScope && onlyThisTime }
@@ -933,7 +965,8 @@ struct ItemEditor: View {
             if let validation { Text(validation).foregroundStyle(palette.warning).font(.system(size: 13)) }
             HStack { Button(L("取消")) { close() }.keyboardShortcut(.cancelAction); Spacer(); Button { save() } label: { Text(saveLabel).padding(.horizontal, 12).padding(.vertical, 6).background(palette.primaryFill, in: RoundedRectangle(cornerRadius: 7)).foregroundStyle(palette.primaryInk).contentShape(Rectangle()) }.buttonStyle(.plain).keyboardShortcut(.defaultAction).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
         }.font(.system(size: 14)).padding(27).frame(width: 420).foregroundStyle(palette.ink).background(palette.background).environment(\.agendaPalette, palette).tint(palette.accent)
-            .onAppear { load(); titleFocused = !editingSingleTime }
+            .onAppear { load(); titleFocused = !editingSingleTime; if let id = item?.id { store.registerDraft(draftToken, ids: [id]) } }
+            .onDisappear { store.releaseDraft(draftToken) }
             .onChange(of: onlyThisTime) {
                 validation = nil
                 day = onlyThisTime ? (occurrence?.displayDay ?? store.selectedDay) : (originalItem?.date ?? store.selectedDay)
@@ -976,6 +1009,9 @@ struct ItemEditor: View {
             guard !times.isEmpty, times.count == weeklyInputs.count else { validation = L("请至少选择一天，并填写有效时间。"); return }
             edited.weeklyTimes = times; edited.timeMinutes = times.values.min()
         } else { edited.weeklyTimes = nil }
+        if let originalItem, store.items.contains(where: { $0.id == originalItem.id }), !store.isUnchangedSinceOpened(originalItem) {
+            validation = L("这条事项在编辑期间已被更新，请取消后重新打开，避免覆盖新内容。"); return
+        }
         let browsingDay = store.selectedDay
         let isExisting = originalItem.map { original in store.items.contains(where: { $0.id == original.id }) } == true
         let saved = schedulingChecklist ? store.scheduleChecklistItem(edited) : store.upsert(edited)
@@ -998,6 +1034,7 @@ struct ChecklistEditor: View {
     @State private var title = ""
     @State private var note = ""
     @State private var validation: String?
+    @State private var draftToken = UUID()
     @FocusState private var titleFocused: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1015,12 +1052,16 @@ struct ChecklistEditor: View {
                 Button { save() } label: { Text(L("保存事项")).padding(.horizontal, 12).padding(.vertical, 6).background(palette.primaryFill, in: RoundedRectangle(cornerRadius: 7)).foregroundStyle(palette.primaryInk).contentShape(Rectangle()) }.buttonStyle(.plain).keyboardShortcut(.defaultAction).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }.font(.system(size: 14)).padding(24).frame(width: 360).foregroundStyle(palette.ink).background(palette.background).environment(\.agendaPalette, palette).tint(palette.accent)
-            .onAppear { title = item?.title ?? ""; note = item?.note ?? ""; titleFocused = true }
+            .onAppear { title = item?.title ?? ""; note = item?.note ?? ""; titleFocused = true; if let id = item?.id { store.registerDraft(draftToken, ids: [id]) } }
+            .onDisappear { store.releaseDraft(draftToken) }
     }
     private func save() {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let saved: Bool
+        if let original = item, store.items.contains(where: { $0.id == original.id }), !store.isUnchangedSinceOpened(original) {
+            validation = L("这条事项在编辑期间已被更新，请取消后重新打开，避免覆盖新内容。"); return
+        }
         if var edited = item { edited.title = trimmed; edited.note = note; saved = store.upsert(edited) }
         else { saved = store.addChecklistItem(title: trimmed, note: note) }
         if saved { close() } else { validation = store.error ?? L("保存失败，请重试。") }
@@ -1131,6 +1172,7 @@ struct SettingsView: View {
             }.font(.system(size: 12))
         }
     }
+    static var changeTimeFormatter: DateFormatter { Localization.dateFormatter(chinese: "M/d HH:mm", english: "M/d HH:mm") }
     private var otherSettings: some View {
         Group {
             card(L("飞书日程"), symbol: "calendar") {
@@ -1150,6 +1192,23 @@ struct SettingsView: View {
             card(L("启动"), symbol: "power") {
                 Toggle(L("登录后打开朝夕"), isOn: Binding(get: { controller.loginEnabled }, set: { controller.setLoginEnabled($0) })).disabled(controller.isQA)
                 DisclosureGroup(L("登记状态")) { Text(controller.loginText).font(.system(size: 11)).foregroundStyle(palette.secondary).padding(.top, 6) }.font(.system(size: 11))
+            }
+            card(L("最近外部改动"), symbol: "arrow.uturn.backward.circle") {
+                let recent = Array(store.externalChanges.suffix(8).reversed())
+                if recent.isEmpty { Text(L("暂无来自 Hermes 或命令行的修改")).font(.system(size: 12)).foregroundStyle(palette.secondary) }
+                ForEach(recent) { record in
+                    HStack(alignment: .center, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text((AgendaChangeOp(rawValue: record.op)?.label ?? record.op) + " · " + record.title).font(.system(size: 12, weight: .medium)).lineLimit(1).help(record.title)
+                            Text(Self.changeTimeFormatter.string(from: record.at) + " · " + record.source).font(.system(size: 10)).foregroundStyle(palette.secondary)
+                        }
+                        Spacer(minLength: 4)
+                        if record.undoneAt != nil { Text(L("已撤销")).font(.system(size: 11)).foregroundStyle(palette.secondary) }
+                        else { Button(L("撤销")) { _ = store.undoExternalChange(record.id) }.controlSize(.small).accessibilityLabel(L("撤销外部改动 \(record.title)")) }
+                    }
+                }
+                if let error = store.error { Text(error).font(.system(size: 11)).foregroundStyle(palette.warning).fixedSize(horizontal: false, vertical: true) }
+                Text(L("只能撤销之后没有再改过的事项；删除也可由外部用 restore 原样恢复。")).font(.system(size: 11)).foregroundStyle(palette.secondary).fixedSize(horizontal: false, vertical: true)
             }
             card(L("数据与备份"), symbol: "externaldrive") {
                 HStack { Text(L("数据只保存在这台 Mac")).font(.system(size: 13)); Spacer(); Button(L("导出备份…")) { controller.exportData() } }

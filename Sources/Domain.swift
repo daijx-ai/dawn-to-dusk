@@ -30,6 +30,13 @@ enum RepeatRule: String, Codable, CaseIterable {
 
 enum ChecklistState: String, Codable { case pending, completed }
 
+/// Inclusive Shanghai day-key range (YYYY-MM-DD) used to pause one repeating item.
+struct AgendaDayRange: Codable, Equatable, Hashable {
+    var from: String
+    var to: String
+    func contains(_ key: String) -> Bool { from <= key && key <= to }
+}
+
 struct AgendaItem: Codable, Identifiable, Equatable {
     var id: UUID = UUID()
     var title: String
@@ -49,7 +56,22 @@ struct AgendaItem: Codable, Identifiable, Equatable {
     var postponedTimes: [String: Date]? = nil
     var checklistState: ChecklistState? = nil
     var feishu: FeishuMetadata? = nil
+    // Skipped occurrence keys and paused ranges hide those days without deleting the series.
+    var skippedDays: Set<String>? = nil
+    var pausedRanges: [AgendaDayRange]? = nil
     var isChecklist: Bool { checklistState != nil }
+    func isSkipped(_ key: String) -> Bool {
+        guard feishu == nil else { return false }
+        return skippedDays?.contains(key) == true || (pausedRanges ?? []).contains { $0.contains(key) }
+    }
+    var hasSkips: Bool { !(skippedDays ?? []).isEmpty || !(pausedRanges ?? []).isEmpty }
+    /// Upper bound of hidden days, used to extend next-occurrence searches.
+    var skippedSpanDays: Int {
+        (skippedDays?.count ?? 0) + (pausedRanges ?? []).reduce(0) { total, range in
+            guard let a = AgendaClock.day(fromKey: range.from), let b = AgendaClock.day(fromKey: range.to) else { return total }
+            return total + max(0, (AgendaClock.calendar.dateComponents([.day], from: a, to: b).day ?? 0) + 1)
+        }
+    }
     var scheduledDay: Date? { isChecklist ? nil : date }
     func timeMinutes(on day: Date) -> Int? {
         if repeatRule == .weekly, let weeklyTimes {
@@ -108,6 +130,13 @@ enum AgendaClock {
         let c = calendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", c.year!, c.month!, c.day!)
     }
+    static func day(fromKey key: String) -> Date? {
+        let parts = key.split(separator: "-", omittingEmptySubsequences: false)
+        guard key.utf8.count == 10, parts.count == 3, let year = Int(parts[0]), (1...9999).contains(year),
+              let month = Int(parts[1]), (1...12).contains(month), let day = Int(parts[2]), (1...31).contains(day),
+              let date = calendar.date(from: DateComponents(year: year, month: month, day: day)), dayKey(date) == key else { return nil }
+        return date
+    }
     static func timeText(_ date: Date) -> String {
         let c = calendar.dateComponents([.hour, .minute], from: date)
         return String(format: "%02d:%02d", c.hour!, c.minute!)
@@ -134,7 +163,7 @@ enum AgendaClock {
                 return Occurrence(item: item, day: day, due: source.isAllDay ? nil : source.start)
             }
             let anchor = startOfDay(item.date)
-            guard day >= anchor else { return nil }
+            guard day >= anchor, !item.isSkipped(dayKey(day)) else { return nil }
             switch item.repeatRule {
             case .none: guard day == anchor else { return nil }
             case .daily: break
@@ -185,7 +214,7 @@ enum AgendaClock {
                 }
             }
             var day = max(startOfDay(now), startOfDay(item.date))
-            let attempts = item.repeatRule == .none ? 1 : (item.completedDays.count + (item.postponedTimes?.count ?? 0) + 2) * 7
+            let attempts = item.repeatRule == .none ? 1 : (item.completedDays.count + (item.postponedTimes?.count ?? 0) + 2) * 7 + item.skippedSpanDays
             for _ in 0..<attempts {
                 if let occurrence = baseOccurrences(items: [item], on: day).first, occurrence.postponedUntil == nil,
                    !occurrence.isCompleted, let due = occurrence.due, due > now {
@@ -217,6 +246,17 @@ enum AgendaClock {
               occurrence.id == id else { return nil }
         if let postponed = occurrence.postponedUntil { occurrence.due = postponed }
         return occurrence
+    }
+    /// Occurrences hidden by skip/pause on the given display day, for an explicit "已跳过" row.
+    static func skippedOccurrences(items: [AgendaItem], on date: Date) -> [Occurrence] {
+        let key = dayKey(startOfDay(date))
+        return items.filter { $0.hasSkips && $0.isSkipped(key) }.compactMap { item in
+            var visible = item
+            visible.skippedDays = nil; visible.pausedRanges = nil; visible.postponedTimes = nil
+            return baseOccurrences(items: [visible], on: date).first.map { occurrence in
+                var value = occurrence; value.item = item; return value
+            }
+        }
     }
     static func overdue(items: [AgendaItem], now: Date) -> [Occurrence] {
         let today = startOfDay(now)

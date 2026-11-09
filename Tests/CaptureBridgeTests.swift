@@ -195,6 +195,129 @@ import Darwin
         check(try CaptureCLI.applicationIsRunning(root: lockRoot), "held app lock means running")
         flock(lockFD, LOCK_UN); Darwin.close(lockFD)
         check(CaptureInbox.notificationObject(for: base.appendingPathComponent("dry/../success")) == success.resolvingSymlinksInPath().path, "notification object normalizes the directory")
+
+        // MARK: --change request parsing
+        func parse(_ object: [String: Any]) throws -> AgendaChangeRequest { try AgendaChangeRequest.parse(JSONSerialization.data(withJSONObject: object)) }
+        let itemID = UUID()
+        let update: [String: Any] = ["request_id": "xlys-chg-1", "op": "update", "target": ["item_id": itemID.uuidString.lowercased()], "fields": ["time": "10:00", "date": "2026-11-10"]]
+        let parsed = try parse(update)
+        check(parsed.target.itemID == itemID && parsed.fields.time == .value(600) && parsed.fields.date == "2026-11-10" && parsed.source == "cli", "update parses with defaults")
+        check(try parse(update).fingerprint == parsed.fingerprint, "fingerprint is stable")
+        var otherFields = update; otherFields["fields"] = ["time": "11:00"]
+        check(try parse(otherFields).fingerprint != parsed.fingerprint, "fingerprint covers fields")
+        var renamed = update; renamed["request_id"] = "xlys-chg-2"
+        check(try parse(renamed).fingerprint == parsed.fingerprint, "fingerprint excludes request_id")
+        check(try parse(["request_id": "a", "op": "update", "target": ["item_id": itemID.uuidString], "fields": ["time": NSNull()]]).fields.time == .clear, "time null clears")
+        let occurrence = itemID.uuidString + ":2026-11-12"
+        check(try parse(["request_id": "a", "op": "reschedule_once", "target": ["occurrence_id": occurrence.lowercased()], "new_time": "09:00"]).target.occurrenceID == occurrence, "occurrence id is normalized")
+        let rejected: [[String: Any]] = [
+            ["op": "update", "target": ["item_id": itemID.uuidString], "fields": ["title": "x"]],
+            ["request_id": "../x", "op": "delete", "target": ["item_id": itemID.uuidString]],
+            ["request_id": "a", "op": "erase", "target": ["item_id": itemID.uuidString]],
+            ["request_id": "a", "op": "delete", "target": ["item_id": itemID.uuidString, "capture_request_id": "b"]],
+            ["request_id": "a", "op": "delete", "target": [:]],
+            ["request_id": "a", "op": "delete", "target": ["item_id": "not-a-uuid"]],
+            ["request_id": "a", "op": "delete", "target": ["item_id": itemID.uuidString], "extra": true],
+            ["request_id": "a", "op": "update", "target": ["item_id": itemID.uuidString]],
+            ["request_id": "a", "op": "update", "target": ["item_id": itemID.uuidString], "fields": ["color": "red"]],
+            ["request_id": "a", "op": "update", "target": ["item_id": itemID.uuidString], "fields": ["duration_minutes": true]],
+            ["request_id": "a", "op": "update", "target": ["item_id": itemID.uuidString], "fields": ["duration_minutes": 1441]],
+            ["request_id": "a", "op": "update", "target": ["item_id": itemID.uuidString], "fields": ["duration_minutes": 1.5]],
+            ["request_id": "a", "op": "update", "target": ["item_id": itemID.uuidString], "fields": ["tentative": 1]],
+            ["request_id": "a", "op": "update", "target": ["item_id": itemID.uuidString], "fields": ["time": "24:00"]],
+            ["request_id": "a", "op": "update", "target": ["item_id": itemID.uuidString], "fields": ["date": "2026-02-30"]],
+            ["request_id": "a", "op": "update", "target": ["item_id": itemID.uuidString], "fields": ["title": "  "]],
+            ["request_id": "a", "op": "update", "target": ["item_id": itemID.uuidString], "fields": ["repeat_rule": "monthly"]],
+            ["request_id": "a", "op": "update", "target": ["item_id": itemID.uuidString], "fields": ["title": "x"], "occurrence_id": occurrence],
+            ["request_id": "a", "op": "delete", "target": ["item_id": itemID.uuidString], "fields": ["title": "x"]],
+            ["request_id": "a", "op": "reschedule_once", "target": ["item_id": itemID.uuidString], "occurrence_id": occurrence],
+            ["request_id": "a", "op": "reschedule_once", "target": ["item_id": UUID().uuidString], "occurrence_id": occurrence, "new_time": "09:00"],
+            ["request_id": "a", "op": "skip_once", "target": ["item_id": itemID.uuidString]],
+            ["request_id": "a", "op": "pause_range", "target": ["item_id": itemID.uuidString], "from": "2026-11-10"],
+            ["request_id": "a", "op": "pause_range", "target": ["item_id": itemID.uuidString], "from": "2026-11-22", "to": "2026-11-10"],
+            ["request_id": "a", "op": "pause_range", "target": ["item_id": itemID.uuidString], "from": "2026-01-01", "to": "2027-01-02"],
+            ["request_id": "a", "op": "resume", "target": ["item_id": itemID.uuidString], "from": "2026-11-10"],
+            ["request_id": "a", "op": "delete", "target": ["item_id": itemID.uuidString], "source": "feishu"],
+            ["request_id": "a", "op": "delete", "target": ["item_id": itemID.uuidString], "if_match": 5],
+        ]
+        for body in rejected {
+            do { _ = try parse(body); preconditionFailure("invalid change accepted: \(body)") } catch { checks += 1 }
+        }
+        for body in ["[]", "null", "not json"] {
+            do { _ = try AgendaChangeRequest.parse(Data(body.utf8)); preconditionFailure("non-object accepted") } catch { checks += 1 }
+        }
+
+        // MARK: --change transport
+        let changeData = try JSONSerialization.data(withJSONObject: update)
+        func invokeChange(_ root: URL, data: Data? = nil, extra: [String] = ["--no-launch"], running: Bool = true,
+                          consumer: ((URL) -> Void)? = nil, preview: ((AgendaChangeRequest, URL) throws -> Data)? = nil) -> (Int32, [String: Any], Data) {
+            var tick: TimeInterval = 0, output = Data()
+            var env = CaptureCLIEnvironment(
+                readInput: { inputReads += 1; return data ?? changeData }, output: { output = $0 },
+                isRunning: { _ in lockChecks += 1; return running },
+                launch: { b, qa, r in launches += 1; launchQA = qa; launchRoot = r; launchBundle = b },
+                notify: { r in notices += 1; consumer?(r) }, clock: { tick }, pause: { tick += 0.01 }, timeout: 0.03)
+            env.previewChange = preview
+            let code = CaptureCLI.runChange(arguments: ["--change", "--qa", "--data-dir", root.path] + extra, bundleURL: bundle, productionRoot: production, environment: env)
+            return (code, (try? JSONSerialization.jsonObject(with: output)) as? [String: Any] ?? [:], output)
+        }
+        func changeHandler(_ status: String, ok: Bool = true, saved: Bool = true, padding: Int = 0) -> (AgendaChangeRequest) -> AgendaChangeResult {
+            { body in
+                var item = AgendaItem(title: "交材料", date: Date(timeIntervalSince1970: 1_800_000_000), timeMinutes: 600)
+                item.id = body.target.itemID ?? UUID()
+                item.note = String(repeating: "备", count: padding)
+                let view = AgendaItemView(item: item, origin: AgendaItemOrigin(source: "cli", captureRequestID: nil))
+                return AgendaChangeResult(ok: ok, status: status, requestID: body.requestID, itemID: item.id, itemExists: true, saved: saved, before: view, after: view)
+            }
+        }
+        func consumeChange(_ root: URL, _ handler: @escaping (AgendaChangeRequest) -> AgendaChangeResult) {
+            MainActor.assumeIsolated { CaptureInbox(root: root).processPending(handler: { _ in preconditionFailure("change routed to capture") }, changeHandler: handler) }
+        }
+        let changed = path("change-ok")
+        let ok = invokeChange(changed, consumer: { consumeChange($0, changeHandler("updated")) })
+        check(ok.0 == 0 && ok.1["status"] as? String == "updated" && ok.1["saved"] as? Bool == true && ok.1["request_id"] as? String == "xlys-chg-1", "change reply is forwarded")
+        check(ok.1["before"] is [String: Any] && ok.1["after"] is [String: Any], "receipt keeps before/after")
+        check(names(changed, suffix: ".change.json").isEmpty && names(changed, suffix: ".reply.json").isEmpty, "change request and reply consumed")
+        let big = invokeChange(path("change-big"), consumer: { consumeChange($0, changeHandler("updated", padding: 4000)) })
+        check(big.0 == 0 && big.2.count > 16 * 1024, "replies with full snapshots above 16 KiB are delivered")
+        for status in ["conflict", "not_found", "forbidden", "invalid"] {
+            let failed = invokeChange(path("change-" + status), consumer: { consumeChange($0, changeHandler(status, ok: false, saved: false)) })
+            check(failed.0 == 1 && failed.1["status"] as? String == status && failed.1["ok"] as? Bool == false, "\(status) is not success")
+        }
+        let unsaved = invokeChange(path("change-unsaved"), consumer: { consumeChange($0, changeHandler("updated", saved: false)) })
+        check(unsaved.0 == 2 && unsaved.1["status"] as? String == "pending", "ok reply without saved is not reliable")
+        let legacy = path("change-legacy")
+        let waiting = invokeChange(legacy, consumer: { r in MainActor.assumeIsolated { CaptureInbox(root: r).processPending(handler: { _ in preconditionFailure("old consumer misread change") }) } })
+        check(waiting.0 == 2 && waiting.1["status"] as? String == "pending" && waiting.1["saved"] as? Bool == false && names(legacy, suffix: ".change.json").count == 1, "a consumer without change support leaves the request pending")
+        check(names(legacy, suffix: ".request.json").isEmpty, "change never uses the capture suffix")
+        let changeFile = queue(legacy).appendingPathComponent(names(legacy, suffix: ".change.json")[0])
+        check((try fm.attributesOfItem(atPath: changeFile.path)[.posixPermissions] as! NSNumber).intValue == 0o600, "queued change file is private")
+        let hostileChange = path("change-hostile")
+        try fm.createDirectory(at: queue(hostileChange), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let hostileAttempt = UUID().uuidString
+        try privateWrite(Data("{\"op\":\"delete\"}".utf8), queue(hostileChange).appendingPathComponent(hostileAttempt + ".change.json"))
+        var changeCalls = 0
+        consumeChange(hostileChange, { body in changeCalls += 1; return changeHandler("deleted")(body) })
+        let hostileReply = try JSONSerialization.jsonObject(with: Data(contentsOf: queue(hostileChange).appendingPathComponent(hostileAttempt + ".reply.json"))) as! [String: Any]
+        check(changeCalls == 0 && hostileReply["status"] as? String == "invalid" && hostileReply["ok"] as? Bool == false, "consumer re-validates queued change before the Store")
+
+        let launchesBefore = launches
+        let startedChange = invokeChange(path("change-started"), extra: [], running: false, consumer: { consumeChange($0, changeHandler("deleted")) })
+        check(startedChange.0 == 0 && launches == launchesBefore + 1 && launchQA == true && launchRoot == path("change-started"), "stopped QA consumer is launched with the isolated root")
+
+        let dryRoot = path("change-dry")
+        var previewed: URL?
+        let dryChange = invokeChange(dryRoot, extra: ["--dry-run"], preview: { request, root in
+            previewed = root
+            return try JSONSerialization.data(withJSONObject: ["ok": true, "status": "preview", "expected_status": "updated", "saved": false, "dry_run": true, "request_id": request.requestID])
+        })
+        check(dryChange.0 == 0 && dryChange.1["status"] as? String == "preview" && previewed == dryRoot && !fm.fileExists(atPath: dryRoot.path), "dry-run reads through the preview only and creates no queue")
+        let noticesBefore = notices
+        check(invokeChange(production, extra: ["--dry-run"], preview: { _, _ in preconditionFailure("production preview in QA") }).0 == 1 && notices == noticesBefore, "QA change cannot target production")
+        check(invokeChange(path("change-bad"), data: Data("{\"request_id\":\"a\",\"op\":\"update\"}".utf8)).0 == 1 && !fm.fileExists(atPath: path("change-bad").path), "invalid change is rejected before the queue")
+        for flags in [["--change", "--capture"], ["--change", "--change"], ["--change", "--query"]] {
+            do { _ = try CaptureCLIOptions.parse(flags, productionRoot: production, command: "--change"); preconditionFailure("mixed flags accepted") } catch { checks += 1 }
+        }
         print("PASS: \(checks) capture bridge checks; fake launch/notification only; isolated temporary files and locks")
     }
 }
